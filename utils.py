@@ -1,12 +1,15 @@
+import functools
 import numpy as np
 import torch
 import builtins
 from inspect import signature, Parameter
+from pyscf import lib
 
 has_profile = hasattr(builtins, 'profile')
 if not has_profile:
     profile = lambda x: x
 
+df_eig = False
 enable_profile = False
 use_fast_fft = False
 
@@ -56,6 +59,80 @@ def maybe_profile(func):
     return newfunc
 
     
+def wrap(func, **fixed_kwargs):
+    @functools.wraps(func)
+    def wrapped(*args, **kwargs):
+        kwargs.update(fixed_kwargs)
+        return func(*args, **kwargs)
+    return wrapped
+
+
+def matrix_operation(A, func):
+    eigvals, eigvecs = np.linalg.eigh(A)
+    eigvals = func(eigvals)
+    return eigvecs @ np.diag(eigvals) @ eigvecs.conj().T
+
+
+def make_df_eig():
+    global df_eig
+    import pyscf.df
+    import pyscf.pbc.df
+    if df_eig:
+        return
+
+    def _eig_decompose(dev, j2c, lindep=pyscf.df.incore.LINEAR_DEP_THR):
+        return matrix_operation(j2c, lambda x: 1 / np.sqrt(x))
+
+    def eigenvalue_decomposed_metric(self, j2c):
+        result = matrix_operation(j2c, lambda x: 1 / np.sqrt(x))
+        return result, None, 'ED'
+
+    pyscf.df.incore.cholesky_eri = wrap(pyscf.df.incore.cholesky_eri, decompose_j2c='eig')
+    pyscf.df.incore._eig_decompose = _eig_decompose
+    pyscf.pbc.df.rsdf_builder._RSGDFBuilder.j2c_eig_always = True
+    pyscf.pbc.df.rsdf_builder._RSGDFBuilder.eigenvalue_decomposed_metric = eigenvalue_decomposed_metric
+    df_eig = True
+
+
+def get_phase_factor(cell, kpts):
+    import pyscf.pbc.tools
+
+    if not isinstance(kpts, np.ndarray):
+        kpts = np.asarray(kpts.kpts)
+
+    kmesh = pyscf.pbc.tools.k2gamma.kpts_to_kmesh(cell, kpts - kpts[0])
+    wrap_around = np.allclose(kpts, cell.get_kpts(kmesh, wrap_around=True))
+    assert np.allclose(kpts, cell.get_kpts(kmesh, wrap_around=wrap_around))
+    scell, phase = pyscf.pbc.tools.k2gamma.get_phase(cell, kpts, kmesh, wrap_around)
+    return phase
+
+
+def k2R(tensor, phase, axis, dual):
+    assert len(axis) == len(dual)
+    out = tensor
+    for ax, is_dual in zip(axis, dual):
+        p = phase.conj() if is_dual else phase
+        out = np.moveaxis(out, ax, 0)
+        shape = out.shape
+        out = p @ out.reshape(shape[0], -1)
+        out = out.reshape((p.shape[0],) + shape[1:])
+        out = np.moveaxis(out, 0, ax)
+    return out
+
+
+def R2k(tensor, phase, axis, dual):
+    assert len(axis) == len(dual)
+    out = tensor
+    for ax, is_dual in zip(axis, dual):
+        p = phase.T if is_dual else phase.conj().T
+        out = np.moveaxis(out, ax, 0)
+        shape = out.shape
+        out = p @ out.reshape(shape[0], -1)
+        out = out.reshape((p.shape[0],) + shape[1:])
+        out = np.moveaxis(out, 0, ax)
+    return out
+
+
 @maybe_profile
 def c_loss_F_norm(logc, X_t, W_t):
     X2 = X_t.abs()**2
@@ -392,3 +469,80 @@ def stochastic_eri_diff(df1, df2, mo_coeff_kpts, nsamples):
         rel_std = 0.0
 
     return rel_diff, rel_std
+
+
+def get_full_gdf_tensor(gdf, kpts_int, kmesh, C1=None, C2=None, progressbar=False):
+    kpts = np.asarray(gdf.kpts)
+    nkpts = len(kpts)
+    nao = gdf.cell.nao_nr()
+    kpt_map = {tuple(k): i for i, k in enumerate(kpts_int)}
+    cderi = gdf.cderi_array()
+    naux = cderi.load(kpts[0], kpts[0]).shape[0]
+    if C1 is None:
+        n1 = nao
+    else:
+        n1 = C1.shape[2]
+    if C2 is None:
+        n2 = nao
+    else:
+        n2 = C2.shape[2]
+    out = np.zeros((nkpts * n1, nkpts * n2, nkpts * naux), dtype=np.complex128)
+
+    kij = [(ki, kj) for ki in range(nkpts) for kj in range(nkpts)]
+    if progressbar:
+        import tqdm
+        kij = tqdm.tqdm(kij, desc="Loading GDF tensor blocks", unit="block")
+    for ki, kj in kij:
+        si = slice(ki * n1, (ki + 1) * n1)
+        sj = slice(kj * n2, (kj + 1) * n2)
+        block = cderi.load(kpts[ki], kpts[kj])
+        if block.shape[1] == nao * (nao + 1) // 2:
+            block = lib.unpack_tril(block)
+        block = block.reshape(naux, nao, nao).transpose(1, 2, 0)
+        if C1 is not None:
+            block = np.einsum("pi,pqL->iqL", C1[ki].conj(), block, optimize=True)
+        if C2 is not None:
+            block = np.einsum("qj,iqL->ijL", C2[kj], block, optimize=True)
+        q_int = (kpts_int[kj] - kpts_int[ki]) % kmesh
+        q = kpt_map[tuple(q_int)]
+        sq = slice(q * naux, (q + 1) * naux)
+        out[si, sj, sq] = block
+    return out
+
+
+def get_gdf_eri_eigvalsh(gdf, kpts_int, kmesh, C1=None, C2=None, progressbar=False):
+    kpts = np.asarray(gdf.kpts)
+    nkpts = len(kpts)
+    nao = gdf.cell.nao_nr()
+    kpt_map = {tuple(k): i for i, k in enumerate(kpts_int)}
+    cderi = gdf.cderi_array()
+    naux = cderi.load(kpts[0], kpts[0]).shape[0]
+    if C1 is None:
+        n1 = nao
+    else:
+        n1 = C1.shape[2]
+    if C2 is None:
+        n2 = nao
+    else:
+        n2 = C2.shape[2]
+    metric = np.zeros((nkpts, naux, naux), dtype=np.complex128)
+
+    kij = [(ki, kj) for ki in range(nkpts) for kj in range(nkpts)]
+    if progressbar:
+        import tqdm
+        kij = tqdm.tqdm(kij, desc="Accumulating GDF metric blocks", unit="block")
+    for ki, kj in kij:
+        block = cderi.load(kpts[ki], kpts[kj])
+        if block.shape[1] == nao * (nao + 1) // 2:
+            block = lib.unpack_tril(block)
+        block = block.reshape(naux, nao, nao).transpose(1, 2, 0)
+        if C1 is not None:
+            block = np.einsum("pi,pqL->iqL", C1[ki].conj(), block, optimize=True)
+        if C2 is not None:
+            block = np.einsum("qj,iqL->ijL", C2[kj], block, optimize=True)
+        q_int = (kpts_int[kj] - kpts_int[ki]) % kmesh
+        q = kpt_map[tuple(q_int)]
+        block = block.reshape(n1 * n2, naux)
+        metric[q] += block.conj().T @ block
+
+    return np.linalg.eigvalsh(metric)
