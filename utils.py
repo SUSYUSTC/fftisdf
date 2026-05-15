@@ -10,6 +10,7 @@ if not has_profile:
     profile = lambda x: x
 
 df_eig = False
+disable_pm_sort = False
 enable_profile = False
 use_fast_fft = False
 
@@ -67,6 +68,11 @@ def wrap(func, **fixed_kwargs):
     return wrapped
 
 
+def ravel_multi_index(indices, shape):
+    strides = shape2stride(shape)
+    return sum(i * s for i, s in tuple(zip(indices, strides))[:-1]) + indices[-1]
+
+
 def matrix_operation(A, func):
     eigvals, eigvecs = np.linalg.eigh(A)
     eigvals = func(eigvals)
@@ -94,43 +100,89 @@ def make_df_eig():
     df_eig = True
 
 
-def get_phase_factor(cell, kpts):
-    import pyscf.pbc.tools
+def make_disable_pm_sort():
+    global disable_pm_sort
+    import pyscf.tools.mo_mapping
+    if disable_pm_sort:
+        return
 
-    if not isinstance(kpts, np.ndarray):
-        kpts = np.asarray(kpts.kpts)
+    pyscf.tools.mo_mapping.mo_1to1map = lambda u: np.arange(u.shape[1])
+    disable_pm_sort = True
 
-    kmesh = pyscf.pbc.tools.k2gamma.kpts_to_kmesh(cell, kpts - kpts[0])
-    wrap_around = np.allclose(kpts, cell.get_kpts(kmesh, wrap_around=True))
-    assert np.allclose(kpts, cell.get_kpts(kmesh, wrap_around=wrap_around))
-    scell, phase = pyscf.pbc.tools.k2gamma.get_phase(cell, kpts, kmesh, wrap_around)
+
+def shape2stride(shape):
+    stride = [1]
+    for dim in shape[1:][::-1]:
+        stride.append(stride[-1] * dim)
+    return tuple(stride[::-1])
+
+
+def unravel_index(indices, shape):
+    strides = shape2stride(shape)
+    # the last stride is always 1
+    n = len(shape)
+    result = torch.empty(indices.shape + (n,), dtype=indices.dtype, device=indices.device)
+    for i, s in enumerate(strides):
+        result[..., i] = indices // s
+        indices = indices - result[..., i] * s
+    return tuple(result[..., i] for i in range(n))
+
+
+def get_one_phase(n):
+    j = torch.arange(n).to(torch.float64)
+    phase = torch.exp((2j * torch.pi / n) * (j[:, None] * j[None, :])) / torch.sqrt(torch.tensor(n, dtype=torch.float64))
     return phase
 
 
-def k2R(tensor, phase, axis, dual):
-    assert len(axis) == len(dual)
-    out = tensor
-    for ax, is_dual in zip(axis, dual):
-        p = phase.conj() if is_dual else phase
-        out = np.moveaxis(out, ax, 0)
-        shape = out.shape
-        out = p @ out.reshape(shape[0], -1)
-        out = out.reshape((p.shape[0],) + shape[1:])
-        out = np.moveaxis(out, 0, ax)
-    return out
+def add_k(idx1, idx2, kmesh):
+    if not isinstance(idx1, torch.Tensor):
+        idx1 = torch.tensor(idx1)
+    if not isinstance(idx2, torch.Tensor):
+        idx2 = torch.tensor(idx2)
+    idx1 = unravel_index(idx1, kmesh)
+    idx2 = unravel_index(idx2, kmesh)
+    idx_sum = tuple((i1 + i2) % n for i1, i2, n in zip(idx1, idx2, kmesh))
+    idx = ravel_multi_index(idx_sum, kmesh)
+    return idx
 
 
-def R2k(tensor, phase, axis, dual):
-    assert len(axis) == len(dual)
-    out = tensor
+def negative_k(idx, kmesh):
+    if not isinstance(idx, torch.Tensor):
+        idx = torch.tensor(idx)
+    idx = unravel_index(idx, kmesh)
+    idx_neg = tuple((-i) % n for i, n in zip(idx, kmesh))
+    idx = ravel_multi_index(idx_neg, kmesh)
+    return idx
+
+
+def fourier_transform_3d(tensor, *, axis, kmesh, inverse):
+    nkpts = tensor.shape[axis]
+    assert int(np.prod(kmesh)) == nkpts
+    tensor = tensor.movedim(axis, 0)
+    tensor = tensor.reshape(kmesh + tensor.shape[1:])
+    if use_fast_fft:
+        if inverse:
+            tensor = torch.fft.ifftn(tensor, dim=tuple(range(len(kmesh))), norm='ortho')
+        else:
+            tensor = torch.fft.fftn(tensor, dim=tuple(range(len(kmesh))), norm='ortho')
+    else:
+        phase_all = [get_one_phase(n).to(dtype=tensor.dtype, device=tensor.device) for n in kmesh]
+        if inverse:
+            phase_all = [phase.conj() for phase in phase_all]
+        tensor = torch.einsum('ijk...,ai,bj,ck->abc...', tensor, *phase_all)
+    tensor = tensor.reshape((nkpts, ) + tensor.shape[3:])
+    tensor = tensor.movedim(0, axis)
+    return tensor
+
+
+def k2R(tensor, *, axis, dual, kmesh):
     for ax, is_dual in zip(axis, dual):
-        p = phase.T if is_dual else phase.conj().T
-        out = np.moveaxis(out, ax, 0)
-        shape = out.shape
-        out = p @ out.reshape(shape[0], -1)
-        out = out.reshape((p.shape[0],) + shape[1:])
-        out = np.moveaxis(out, 0, ax)
-    return out
+        tensor = fourier_transform_3d(tensor, axis=ax, kmesh=kmesh, inverse=is_dual)
+    return tensor
+
+
+def R2k(tensor, *, axis, dual, kmesh):
+    return k2R(tensor, axis=axis, dual=tuple([not d for d in dual]), kmesh=kmesh)
 
 
 @maybe_profile
@@ -161,6 +213,7 @@ def c_loss_2_norm(logc, X_t, W_t):
 @maybe_profile
 def thc_ovvo_build_Lbar(Xo_A, Xv_A, Xo_B, Xv_B, kmesh):
     nkpts, naux_A = Xo_A.shape[:2]
+    sqrt_nkpts = np.sqrt(nkpts).item()
     naux_B = Xo_B.shape[1]
     kmesh = tuple(int(x) for x in kmesh)
     assert nkpts == int(np.prod(kmesh))
@@ -168,41 +221,14 @@ def thc_ovvo_build_Lbar(Xo_A, Xv_A, Xo_B, Xv_B, kmesh):
     O = torch.einsum("pIi,pKi->pIK", Xo_A, Xo_B.conj())
     V = torch.einsum("qIa,qKa->qIK", Xv_A.conj(), Xv_B)
 
-    O = O.reshape(*kmesh, naux_A, naux_B)
-    V = V.reshape(*kmesh, naux_A, naux_B)
+    O_fft = fourier_transform_3d(O, axis=0, kmesh=kmesh, inverse=False)
+    V_fft = fourier_transform_3d(V, axis=0, kmesh=kmesh, inverse=False)
 
-    if use_fast_fft:
-        O_fft = torch.fft.fftn(O, dim=tuple(range(len(kmesh))))
-        V_fft = torch.fft.fftn(V, dim=tuple(range(len(kmesh))))
-    else:
-        for axis, n in enumerate(kmesh):
-            j = torch.arange(n, device=O.device, dtype=torch.float64)
-            phase = torch.exp((-2j * np.pi / n) * (j[:, None] * j[None, :])).to(dtype=O.dtype)
+    negative = negative_k(torch.arange(nkpts), kmesh)
+    Lbar = O_fft[negative] * V_fft
+    Lbar = fourier_transform_3d(Lbar, axis=0, kmesh=kmesh, inverse=True)
 
-            shape = O.shape
-            O = O.movedim(axis, 0)
-            O = (phase @ O.reshape(n, -1)).reshape(O.shape).movedim(0, axis)
-
-            V = V.movedim(axis, 0)
-            V = (phase @ V.reshape(n, -1)).reshape(V.shape).movedim(0, axis)
-        O_fft = O
-        V_fft = V
-
-    for axis, n in enumerate(kmesh):
-        idx = (-torch.arange(n, device=O_fft.device)) % n
-        O_fft = O_fft.index_select(axis, idx)
-
-    Lbar = O_fft * V_fft
-    if use_fast_fft:
-        Lbar = torch.fft.ifftn(Lbar, dim=tuple(range(len(kmesh))))
-    else:
-        for axis, n in enumerate(kmesh):
-            j = torch.arange(n, device=Lbar.device, dtype=torch.float64)
-            phase = torch.exp((2j * np.pi / n) * (j[:, None] * j[None, :])).to(dtype=Lbar.dtype) / n
-            Lbar = Lbar.movedim(axis, 0)
-            Lbar = (phase @ Lbar.reshape(n, -1)).reshape(Lbar.shape).movedim(0, axis)
-
-    return Lbar.reshape(nkpts, naux_A, naux_B)
+    return Lbar.reshape(nkpts, naux_A, naux_B) * sqrt_nkpts
 
 
 @maybe_profile
@@ -546,3 +572,64 @@ def get_gdf_eri_eigvalsh(gdf, kpts_int, kmesh, C1=None, C2=None, progressbar=Fal
         metric[q] += block.conj().T @ block
 
     return np.linalg.eigvalsh(metric)
+
+
+def borrow_ij_pairs(dim, q, bout, bin_all):
+    pairs = []
+    for bin_ in bin_all:
+        for i in range(dim):
+            for j in range(dim):
+                t = j - i - bin_
+                q_ = t % dim
+                bout_ = 1 if t < 0 else 0
+                if q_ == q and (bout is None or bout_ == bout):
+                    pairs.append((i, j))
+    return pairs
+
+
+def _mpo_borrow_block_norm_site(T, isite, nsite):
+    if T.ndim == 3 and isite == 0:
+        dim, _, right = T.shape
+        T = T.reshape(1, dim, dim, right)
+    elif T.ndim == 3 and isite == nsite - 1:
+        left, dim, _ = T.shape
+        T = T.reshape(left, dim, dim, 1)
+
+    left, dim, _, right = T.shape
+
+    if isite == 0:
+        bin_all = [0]
+    else:
+        bin_all = [0, 1]
+
+    if isite == nsite - 1:
+        bout_all = [None]
+    else:
+        bout_all = [0, 1]
+
+    norms = []
+    for q in range(dim):
+        for bout in bout_all:
+            pairs = borrow_ij_pairs(dim, q, bout, bin_all)
+            if pairs:
+                blocks = []
+                for i, j in pairs:
+                    blocks.append(T[:, i, j, :].reshape(left, right))
+                M = np.concatenate(blocks, axis=0)
+                norms.append(np.linalg.svd(M, compute_uv=False)[0])
+            else:
+                norms.append(0.0)
+    return max(norms), norms
+
+
+def mpo_borrow_block_norm(tensors, return_blocks=False):
+    nsite = len(tensors)
+    all_norms = []
+    all_block_norms = []
+    for isite, T in enumerate(tensors):
+        norm, block_norms = _mpo_borrow_block_norm_site(T, isite, nsite)
+        all_norms.append(norm)
+        all_block_norms.append(block_norms)
+    if return_blocks:
+        return all_norms, all_block_norms
+    return all_norms

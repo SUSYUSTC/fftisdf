@@ -43,7 +43,7 @@ Cocc = np.array(C[:, :, o], order="C", copy=True)
 Cvir = np.array(C[:, :, v], order="C", copy=True)
 nvir = Cvir.shape[2]
 
-cisdf = 10
+cisdf = int(sys.argv[2])
 reg = 1e-8
 compare_with_exact = False
 save_isdf = True

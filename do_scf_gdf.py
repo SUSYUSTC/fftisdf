@@ -7,6 +7,9 @@ signal.signal(signal.SIGINT, signal.SIG_DFL)
 import numpy as np
 from pyscf.pbc import gto, scf, df
 
+kmesh = (int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]))
+basis = sys.argv[4]
+
 a = 1.7834
 lv = np.ones((3, 3)) * a
 lv -= np.diag([a, a, a])
@@ -17,17 +20,18 @@ cell = gto.Cell()
 cell.unit = "A"
 cell.atom = atom
 cell.a = lv
-cell.basis = "gth-dzvp"
+cell.basis = basis
 cell.pseudo = "gth-pbe"
 cell.ke_cutoff = 40.0
 cell.verbose = 0
 cell.build()
 
-nk = int(sys.argv[1])
-kmesh = np.array([nk, nk, nk])
 klabel = f"{kmesh[0]}x{kmesh[1]}x{kmesh[2]}"
 kpts = cell.make_kpts(kmesh)
 kpts_int = np.round(cell.get_scaled_kpts(kpts) * kmesh).astype(int) % kmesh
+
+S = cell.pbc_intor("int1e_ovlp", kpts=kpts)
+print('min S eigval', np.linalg.eigvalsh(S).min())
 
 scf_pkl = f"data_GDF/SCF_diamond_{klabel}_{cell.basis}_ke{cell.ke_cutoff}.pkl"
 gdf_chk = f"data_GDF/GDF_diamond_{klabel}_{cell.basis}_ke{cell.ke_cutoff}.chk"
