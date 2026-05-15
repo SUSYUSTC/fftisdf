@@ -34,7 +34,7 @@ S = cell.pbc_intor("int1e_ovlp", kpts=kpts)
 print('min S eigval', np.linalg.eigvalsh(S).min())
 
 scf_pkl = f"data_GDF/SCF_diamond_{klabel}_{cell.basis}_ke{cell.ke_cutoff}.pkl"
-gdf_chk = f"data_GDF/GDF_diamond_{klabel}_{cell.basis}_ke{cell.ke_cutoff}.chk"
+gdf_chk = f"data_GDF/GDF_diamond_{klabel}_{cell.basis}.chk"
 
 
 def make_gdf():

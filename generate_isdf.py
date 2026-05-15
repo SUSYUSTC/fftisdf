@@ -20,7 +20,7 @@ scf_pkl = f"data/SCF_diamond_{klabel}_{basis}_ke{ke_cutoff}.pkl"
 with open(scf_pkl, "rb") as f:
     mf = pickle.load(f)
 if isinstance(mf.with_df, df.GDF):
-    gdf_chk = f"data/GDF_diamond_{klabel}_{basis}_ke{ke_cutoff}.chk"
+    gdf_chk = f"data/GDF_diamond_{klabel}_{basis}.chk"
     mf.with_df._cderi = gdf_chk
 
 cell = mf.cell
