@@ -337,52 +337,6 @@ def R2k(tensor, *, axis, dual, kmesh):
 
 
 @maybe_profile
-def c_loss_F_norm(logc, X_t, W_t):
-    X2 = X_t.abs()**2
-    a = X2.sum(dim=tuple(i for i in range(X_t.ndim) if i != 1)).to(logc.dtype)
-
-    W2 = W_t.abs()**2
-    b = W2.sum(dim=tuple(i for i in range(W_t.ndim) if i not in (W_t.ndim - 2, W_t.ndim - 1))).to(logc.dtype)
-
-    c2 = torch.exp(2.0 * logc)
-    c4_inv = torch.exp(-4.0 * logc)
-    sx2 = torch.dot(a, c2)
-    sw2 = (b * c4_inv[:, None] * c4_inv[None, :]).sum()
-    return sx2 * sx2 * torch.sqrt(sw2)
-
-
-@maybe_profile
-def c_loss_2_norm(logc, X_t, W_t):
-    c = torch.exp(logc)
-    X = X_t * c[None, :, None]
-    W = W_t / (c[None, :, None]**2 * c[None, None, :]**2)
-    s_X = torch.linalg.svdvals(X).max()
-    s_W = torch.linalg.eigvalsh(W).abs().max()
-    return s_X**4 * s_W
-
-
-@maybe_profile
-def thc_ovvo_build_Lbar(Xo_A, Xv_A, Xo_B, Xv_B, kmesh):
-    # contract four W and get a (q, I, j) object
-    nkpts, naux_A = Xo_A.shape[:2]
-    sqrt_nkpts = np.sqrt(nkpts).item()
-    naux_B = Xo_B.shape[1]
-    assert nkpts == int(np.prod(kmesh))
-
-    O = torch.einsum("pIi,pKi->pIK", Xo_A, Xo_B.conj())
-    V = torch.einsum("qIa,qKa->qIK", Xv_A.conj(), Xv_B)
-
-    O_fft = fourier_transform_3d(O, axis=0, kmesh=kmesh, inverse=False)
-    V_fft = fourier_transform_3d(V, axis=0, kmesh=kmesh, inverse=False)
-
-    negative = negative_k(torch.arange(nkpts), kmesh)
-    Lbar = O_fft[negative] * V_fft
-    Lbar = fourier_transform_3d(Lbar, axis=0, kmesh=kmesh, inverse=True)
-
-    return Lbar.reshape(nkpts, naux_A, naux_B) * sqrt_nkpts
-
-
-@maybe_profile
 def torch_lstsq(a, b, tol=1e-10, reg=None):
     u, s, vh = torch.linalg.svd(a, full_matrices=False)
     r = s[None, :] * s[:, None]
@@ -413,6 +367,44 @@ def torch_lstsq_oinv_PSD(a, b, reg=None):
         result = torch.linalg.solve(a.T, torch.linalg.solve(a, b).T).T
     synchronize()
     return result.to(dtype=dtype)
+
+
+@maybe_profile
+def thc_ovvo_build_Lbar(Xo_A, Xv_A, Xo_B, Xv_B, kmesh):
+    # contract four W and get a (q, I, j) object
+    nkpts, naux_A = Xo_A.shape[:2]
+    sqrt_nkpts = np.sqrt(nkpts).item()
+    naux_B = Xo_B.shape[1]
+    assert nkpts == int(np.prod(kmesh))
+
+    O = torch.einsum("kIi,kJi->kIJ", Xo_A, Xo_B.conj())
+    V = torch.einsum("kIa,kJa->kIJ", Xv_A.conj(), Xv_B)
+
+    O_fft = fourier_transform_3d(O, axis=0, kmesh=kmesh, inverse=False)
+    V_fft = fourier_transform_3d(V, axis=0, kmesh=kmesh, inverse=False)
+
+    negative = negative_k(torch.arange(nkpts), kmesh)
+    Lbar = O_fft[negative] * V_fft
+    Lbar = fourier_transform_3d(Lbar, axis=0, kmesh=kmesh, inverse=True)
+
+    return Lbar.reshape(nkpts, naux_A, naux_B) * sqrt_nkpts
+
+
+@maybe_profile
+def thc_build_Lbar(X_A, X_B, kmesh):
+    nkpts, naux_A = X_A.shape[:2]
+    sqrt_nkpts = np.sqrt(nkpts).item()
+    naux_B = X_B.shape[1]
+    assert nkpts == int(np.prod(kmesh))
+
+    O = torch.einsum("kIa,kJa->kIJ", X_A, X_B.conj())
+    O_fft = fourier_transform_3d(O, axis=0, kmesh=kmesh, inverse=False)
+
+    negative = negative_k(torch.arange(nkpts, device=X_A.device), kmesh)
+    Lbar = (O_fft[negative].abs()**2).to(dtype=O_fft.dtype)
+    Lbar = fourier_transform_3d(Lbar, axis=0, kmesh=kmesh, inverse=True)
+
+    return Lbar.reshape(nkpts, naux_A, naux_B) * sqrt_nkpts
 
 
 @maybe_profile
@@ -450,62 +442,102 @@ def thc_ovvo_solve_w_error2_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, kmesh, ref_no
     return W, error2
 
 
-def thc_full_inner_from_mo(X_A, W_A, X_B, W_B, kmesh):
-    return thc_ovvo_inner_from_mo(X_A, X_A, W_A, X_B, X_B, W_B, kmesh)
-
-
 def thc_inner_from_mo(X_A, W_A, X_B, W_B, kmesh):
-    return thc_ovvo_inner_from_mo(X_A, X_A, W_A, X_B, X_B, W_B, kmesh)
+    Lbar = thc_build_Lbar(X_A, X_B, kmesh)
+    return (W_A.conj().transpose(-1, -2) @ Lbar @ W_B @ Lbar.conj().transpose(-1, -2)).diagonal(dim1=-1, dim2=-2).sum()
 
 
 @maybe_profile
-def thc_df_build_A_from_mo(X, R, kmesh):
-    nkpts = int(np.prod(kmesh))
-    k = torch.arange(nkpts, device=X.device)
-    q = torch.arange(nkpts, device=X.device)
-    kq = add_k(k[:, None], q[None, :], kmesh).to(device=X.device)
+def thc_error2_from_mo(X_A, W_A, X_B, W_B, kmesh):
+    aa = thc_inner_from_mo(X_A, W_A, X_A, W_A, kmesh)
+    bb = thc_inner_from_mo(X_B, W_B, X_B, W_B, kmesh)
+    ab = thc_inner_from_mo(X_A, W_A, X_B, W_B, kmesh)
+    return (aa + bb - 2.0 * ab.real).real
 
-    X2 = X[kq]
-    A = torch.einsum("kIa,kqIb,kqxab->qIx", X, X2.conj(), R)
+
+@maybe_profile
+def thc_solve_w_from_mo(X_ref, W_ref, X, kmesh, reg=None):
+    L_mix = thc_build_Lbar(X_ref, X, kmesh)
+    L = thc_build_Lbar(X, X, kmesh)
+    rhs = L_mix.conj().transpose(-1, -2) @ W_ref @ L_mix
+    return torch_lstsq_oinv_PSD(L, rhs, reg=reg)
+
+
+@maybe_profile
+def thc_solve_w_error2_from_mo(X_ref, W_ref, X, kmesh, ref_norm2, reg=None):
+    L_mix = thc_build_Lbar(X_ref, X, kmesh)
+    L = thc_build_Lbar(X, X, kmesh)
+    rhs = L_mix.conj().transpose(-1, -2) @ W_ref @ L_mix
+    W = torch_lstsq_oinv_PSD(L, rhs, reg=reg)
+
+    ab = ((W.conj().transpose(-1, -2) @ rhs).diagonal(dim1=-1, dim2=-2).sum()).real
+    bb = ((W.conj().transpose(-1, -2) @ L @ W @ L.conj().transpose(-1, -2)).diagonal(dim1=-1, dim2=-2).sum()).real
+    error2 = (ref_norm2 + bb - 2.0 * ab).real
+    return W, error2
+
+
+@maybe_profile
+def thc_df_ov_build_A_from_mo(Xo, Xv, R, kmesh):
+    nkpts = int(np.prod(kmesh))
+    k = torch.arange(nkpts, device=Xo.device)
+    q = torch.arange(nkpts, device=Xo.device)
+    kq = add_k(k[:, None], q[None, :], kmesh).to(device=Xo.device)
+
+    Xv2 = Xv[kq]
+    A = torch.einsum("kIi,kqIa,kqxia->qIx", Xo, Xv2.conj(), R)
     return A
 
 
 @maybe_profile
-def thc_df_rhs_from_mo(X, R, kmesh):
-    nkpts = int(np.prod(kmesh))
-    q_all = torch.arange(nkpts, device=X.device)
-    neg = negative_k(q_all, kmesh).to(device=X.device)
-
-    A = thc_df_build_A_from_mo(X, R, kmesh)
-    B = torch.einsum("qIx,qJx->qIJ", A, A[neg])
+def thc_df_ov_rhs_from_mo(Xo, Xv, R, kmesh):
+    A = thc_df_ov_build_A_from_mo(Xo, Xv, R, kmesh)
+    B = torch.einsum("qIx,qJx->qIJ", A, A.conj())
     return B
 
 
 @maybe_profile
-def thc_df_inner_from_mo(X, W, R, kmesh):
-    B = thc_df_rhs_from_mo(X, R, kmesh)
+def thc_df_ov_inner_from_mo(Xo, Xv, W, R, kmesh):
+    B = thc_df_ov_rhs_from_mo(Xo, Xv, R, kmesh)
     return torch.sum(W.conj() * B)
 
 
 @maybe_profile
-def thc_df_error2_from_mo(X, W, R, kmesh, df_norm2):
-    aa = thc_inner_from_mo(X, W, X, W, kmesh).real
-    ab = thc_df_inner_from_mo(X, W, R, kmesh).real
+def thc_df_inner_from_mo(X, W, R, kmesh):
+    return thc_df_ov_inner_from_mo(X, X, W, R, kmesh)
+
+
+@maybe_profile
+def thc_df_ov_error2_from_mo(Xo, Xv, W, R, kmesh, df_norm2):
+    aa = thc_ovvo_inner_from_mo(Xo, Xv, W, Xo, Xv, W, kmesh).real
+    ab = thc_df_ov_inner_from_mo(Xo, Xv, W, R, kmesh).real
     return (aa + df_norm2 - 2.0 * ab).real
 
 
 @maybe_profile
-def thc_df_solve_w_from_mo(X, R, kmesh, reg=None):
-    A = thc_ovvo_build_Lbar(X, X, X, X, kmesh)
-    B = thc_df_rhs_from_mo(X, R, kmesh)
+def thc_df_error2_from_mo(X, W, R, kmesh, df_norm2):
+    return thc_df_ov_error2_from_mo(X, X, W, R, kmesh, df_norm2)
+
+
+@maybe_profile
+def thc_df_ov_solve_w_from_mo(Xo, Xv, R, kmesh, reg=None):
+    A = thc_ovvo_build_Lbar(Xo, Xv, Xo, Xv, kmesh)
+    B = thc_df_ov_rhs_from_mo(Xo, Xv, R, kmesh)
     W = torch_lstsq_oinv_PSD(A, B, reg=reg)
     return W
 
 
 @maybe_profile
-def thc_df_solve_w_error2_from_mo(X, R, kmesh, df_norm2, reg=None):
-    A = thc_ovvo_build_Lbar(X, X, X, X, kmesh)
-    B = thc_df_rhs_from_mo(X, R, kmesh)
+def thc_df_solve_w_from_mo(X, R, kmesh, reg=None):
+    A = thc_build_Lbar(X, X, kmesh)
+    B = thc_df_ov_rhs_from_mo(X, X, R, kmesh)
+    W = torch_lstsq_oinv_PSD(A, B, reg=reg)
+    return W
+
+
+@maybe_profile
+def thc_df_ov_solve_w_error2_from_mo(Xo, Xv, R, kmesh, df_norm2, reg=None):
+    A = thc_ovvo_build_Lbar(Xo, Xv, Xo, Xv, kmesh)
+    B = thc_df_ov_rhs_from_mo(Xo, Xv, R, kmesh)
     W = torch_lstsq_oinv_PSD(A, B, reg=reg)
     ab = torch.sum(W.conj() * B).real
     bb = ((W.conj().transpose(-1, -2) @ A @ W @ A.conj().transpose(-1, -2)).diagonal(dim1=-1, dim2=-2).sum()).real
@@ -514,11 +546,20 @@ def thc_df_solve_w_error2_from_mo(X, R, kmesh, df_norm2, reg=None):
 
 
 @maybe_profile
-def df_inner_from_mo(R_A, R_B, kmesh):
-    nkpts = int(np.prod(kmesh))
-    neg = negative_k(torch.arange(nkpts, device=R_A.device), kmesh).to(device=R_A.device)
-    M = torch.einsum("kqxab,kqyab->qxy", R_A.conj(), R_B)
-    return torch.einsum("qxy,qxy->", M, M[neg])
+def thc_df_solve_w_error2_from_mo(X, R, kmesh, df_norm2, reg=None):
+    A = thc_build_Lbar(X, X, kmesh)
+    B = thc_df_ov_rhs_from_mo(X, X, R, kmesh)
+    W = torch_lstsq_oinv_PSD(A, B, reg=reg)
+    ab = torch.sum(W.conj() * B).real
+    bb = ((W.conj().transpose(-1, -2) @ A @ W @ A.conj().transpose(-1, -2)).diagonal(dim1=-1, dim2=-2).sum()).real
+    error2 = (df_norm2 + bb - 2.0 * ab).real
+    return W, error2
+
+
+@maybe_profile
+def df_inner_from_mo(R, kmesh):
+    M = torch.einsum("kqxab,kqyab->qxy", R.conj(), R)
+    return torch.einsum("qxy,qxy->", M, M.conj())
 
 
 def is_k_ordered(kpts_int, kmesh):

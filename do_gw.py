@@ -2,8 +2,8 @@ import sys
 import pickle
 import numpy as np
 from fcdmft.gw.pbc.krgw_ac import KRGWAC
-#import threadpoolctl
-#threadpoolctl.threadpool_limits(1)
+import threadpoolctl
+threadpoolctl.threadpool_limits(1)
 
 kmesh = (int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]))
 klabel = f"{kmesh[0]}x{kmesh[1]}x{kmesh[2]}"

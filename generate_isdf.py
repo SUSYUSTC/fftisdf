@@ -7,8 +7,8 @@ from pyscf.pbc import df
 import numpy as np
 
 import fft
-import utils
 fft.isdf.CHOLESKY_MAX_SIZE = 12000
+import utils
 
 nk = int(sys.argv[1])
 basis = "gth-dzvp"

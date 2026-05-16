@@ -1,4 +1,4 @@
-import os, sys, h5py
+import os, sys, h5py, atexit, weakref
 from functools import reduce
 
 import numpy, scipy
@@ -30,6 +30,16 @@ from pyscf.pbc.dft.gen_grid import BLKSIZE
 CHOLESKY_TOL = getattr(__config__, "fftisdf_cholesky_tol", 1e-20)
 CHOLESKY_MAX_SIZE = getattr(__config__, "fftisdf_cholesky_max_size", 20000)
 CONTRACT_MAX_SIZE = getattr(__config__, "fftisdf_contract_max_size", 20000)
+
+_OPEN_ISDF_OBJECTS = weakref.WeakSet()
+
+
+def _close_open_isdf_objects():
+    for obj in list(_OPEN_ISDF_OBJECTS):
+        obj.close()
+
+
+atexit.register(_close_open_isdf_objects)
 
 # Naming convention:
 # *_kpt: k-space array, which shapes as (nkpt, x, x)
@@ -270,8 +280,29 @@ class InterpolativeSeparableDensityFitting(FFTDF):
         self._base_metx_kpt = None
         self._base_kern_kpt = None
         self.reg = 0.0
-        self.c = None
         self.ov = ov
+        _OPEN_ISDF_OBJECTS.add(self)
+
+    def close(self):
+        if self._fswap is not None:
+            fswap = self._fswap
+            self._fswap = None
+            try:
+                filename = fswap.filename
+            except Exception:
+                filename = None
+            try:
+                fswap.close()
+            except Exception:
+                pass
+            if filename is not None and os.path.exists(filename):
+                try:
+                    os.remove(filename)
+                except Exception:
+                    pass
+
+    def __del__(self):
+        self.close()
 
     get_eri = isdf_ao2mo.get_ao_eri
     get_ao_eri = isdf_ao2mo.get_ao_eri
@@ -431,18 +462,12 @@ class InterpolativeSeparableDensityFitting(FFTDF):
 
         return kern_kpt
 
-    def solve_coul_kpt(self, metx_kpt, kern_kpt, reg=0.0, c=None):
+    def solve_coul_kpt(self, metx_kpt, kern_kpt, reg=0.0):
         log = logger.new_logger(self, self.verbose)
         tol = self.tol
 
         nkpt, nip = metx_kpt.shape[:2]
         coul_kpt = numpy.zeros((nkpt, nip, nip), dtype=numpy.complex128)
-        if c is not None:
-            c = numpy.asarray(c)
-            assert c.shape == (nip,)
-            d = c * c
-        else:
-            d = None
 
         log.debug("\nSolving coul_kpt")
         info = (lambda s: f"coul_kpt[ %{len(s)}d / {s}]")(str(nkpt))
@@ -451,9 +476,6 @@ class InterpolativeSeparableDensityFitting(FFTDF):
 
             metx_q = metx_kpt[q]
             kern_q = kern_kpt[q]
-            if d is not None:
-                metx_q = d[:, None] * metx_q * d[None, :]
-                kern_q = d[:, None] * kern_q * d[None, :]
             res = lstsq(metx_q, kern_q, tol=tol, reg=reg)
             coul_q = res[0]
             coul_q = (coul_q + coul_q.conj().T) / 2
@@ -469,10 +491,10 @@ class InterpolativeSeparableDensityFitting(FFTDF):
 
         return coul_kpt
 
-    def build_coul_kpt(self, inpv_kpt, eta_kpt, reg=0.0, c=None):
+    def build_coul_kpt(self, inpv_kpt, eta_kpt, reg=0.0):
         metx_kpt = self.build_metx_kpt(inpv_kpt)
         kern_kpt = self.build_kern_kpt(inpv_kpt, eta_kpt)
-        coul_kpt = self.solve_coul_kpt(metx_kpt, kern_kpt, reg=reg, c=c)
+        coul_kpt = self.solve_coul_kpt(metx_kpt, kern_kpt, reg=reg)
         self._base_metx_kpt = metx_kpt
         self._base_kern_kpt = kern_kpt
         return coul_kpt
@@ -508,12 +530,9 @@ class InterpolativeSeparableDensityFitting(FFTDF):
         assert self._base_kern_kpt is not None
         return self._base_kern_kpt
 
-    def build(self, cisdf=10.0, reg=0.0, c=None):
+    def build(self, cisdf=10.0, reg=0.0):
         log = logger.new_logger(self, self.verbose)
         self.reg = reg
-        if c is not None:
-            c = numpy.asarray(c)
-        self.c = c
 
         # If a pre-computed ISDF is available, load the final tensors.
         if self._isdf is not None and self._base_inpv_kpt is None:
@@ -525,7 +544,6 @@ class InterpolativeSeparableDensityFitting(FFTDF):
             coul_kpt = load(isdf_to_read, "coul_kpt")
             self._inpv_kpt = inpv_kpt
             self._coul_kpt = coul_kpt
-            self.c = None
             if self._fswap is not None:
                 fswap = self._fswap.filename
                 self._fswap.close()
@@ -540,15 +558,12 @@ class InterpolativeSeparableDensityFitting(FFTDF):
         # inpv_kpt is a (nkpt, nip, nao) array
         base_inpv_kpt = self._base_inpv_kpt
         if base_inpv_kpt is not None:
-            log.debug("Using pre-computed interpolating vectors, c0 is not used")
+            log.debug("Using pre-computed interpolating vectors")
         else:
             base_inpv_kpt = self.build_inpv_kpt(cisdf=cisdf)
             self._base_inpv_kpt = base_inpv_kpt
 
-        if c is None:
-            inpv_kpt = base_inpv_kpt
-        else:
-            inpv_kpt = base_inpv_kpt * c[None, :, None]
+        inpv_kpt = base_inpv_kpt
         self._inpv_kpt = inpv_kpt
 
         self.dump_flags()
@@ -585,13 +600,42 @@ class InterpolativeSeparableDensityFitting(FFTDF):
         # [Step 3]: compute the Coulomb kernel,
         # coul_kpt is a (nkpt, nip, nip) array
         t0 = (process_clock(), perf_counter())
-        coul_kpt = self.solve_coul_kpt(metx_kpt, kern_kpt, reg=reg, c=c)
+        coul_kpt = self.solve_coul_kpt(metx_kpt, kern_kpt, reg=reg)
         log.timer("solving coul_kpt", *t0)
 
         # [Step 4]: save the results
         self._inpv_kpt = inpv_kpt
         self._coul_kpt = coul_kpt
         self._finalize()
+
+    def build_inpv_only(self, cisdf=10.0):
+        log = logger.new_logger(self, self.verbose)
+
+        if self._isdf is not None and self._base_inpv_kpt is None:
+            isdf_to_read = self._isdf
+            assert os.path.exists(isdf_to_read)
+            log.info("Loading ISDF interpolating vectors from %s", isdf_to_read)
+            base_inpv_kpt = load(isdf_to_read, "inpv_kpt")
+            self._base_inpv_kpt = base_inpv_kpt
+        else:
+            self.check_sanity()
+            base_inpv_kpt = self._base_inpv_kpt
+            if base_inpv_kpt is not None:
+                log.debug("Using pre-computed interpolating vectors")
+            else:
+                base_inpv_kpt = self.build_inpv_kpt(cisdf=cisdf)
+                self._base_inpv_kpt = base_inpv_kpt
+
+        inpv_kpt = base_inpv_kpt
+        self._inpv_kpt = inpv_kpt
+
+        if self._fswap is not None:
+            fswap = self._fswap.filename
+            self._fswap.close()
+            self._fswap = None
+            if os.path.exists(fswap):
+                os.remove(fswap)
+        return inpv_kpt
     
     def _finalize(self):
         log = logger.new_logger(self, self.verbose)
