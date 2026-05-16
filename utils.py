@@ -110,6 +110,157 @@ def make_disable_pm_sort():
     disable_pm_sort = True
 
 
+def stochastic_eri_diff(df1, df2, mo_coeff_kpts, nsamples):
+    from pyscf.pbc import tools as pbctools
+
+    kpts = np.asarray(df1.kpts)
+    assert np.allclose(kpts, np.asarray(df2.kpts))
+
+    kmesh = pbctools.k2gamma.kpts_to_kmesh(df1.cell, kpts - kpts[0])
+    kmesh = np.asarray(kmesh, dtype=int)
+    kpts_int = np.round(df1.cell.get_scaled_kpts(kpts) * kmesh).astype(int) % kmesh
+    assert is_k_ordered(kpts_int, kmesh)
+
+    if isinstance(mo_coeff_kpts, np.ndarray) and mo_coeff_kpts.ndim == 3:
+        mo_coeff_kpts = [mo_coeff_kpts, ] * 4
+    else:
+        mo_coeff_kpts = list(mo_coeff_kpts)
+    assert len(mo_coeff_kpts) == 4
+
+    kpt_map = {tuple(k): i for i, k in enumerate(kpts_int)}
+    nkpts = len(kpts)
+    rng = np.random.default_rng()
+
+    diff2 = np.empty(nsamples, dtype=np.float64)
+    ref2 = np.empty(nsamples, dtype=np.float64)
+    import tqdm
+    for isample in tqdm.tqdm(range(nsamples)):
+        k1, k2, k3 = rng.integers(0, nkpts, size=3)
+        k4_int = (kpts_int[k1] - kpts_int[k2] + kpts_int[k3]) % kmesh
+        k4 = kpt_map[tuple(k4_int)]
+        kpts4 = kpts[[k1, k2, k3, k4]]
+        mo_coeff_sample = []
+        for mo, ki in zip(mo_coeff_kpts, (k1, k2, k3, k4)):
+            mo_coeff_sample.append(mo[ki])
+
+        eri1 = df1.ao2mo(mo_coeff_sample, kpts=kpts4).flatten()
+        eri2 = df2.ao2mo(mo_coeff_sample, kpts=kpts4).flatten()
+        diff2[isample] = np.linalg.norm(eri1 - eri2)**2
+        ref2[isample] = np.linalg.norm(eri1)**2
+
+    diff_mean = diff2.mean()
+    ref_mean = ref2.mean()
+    rel_diff = float(np.sqrt(diff_mean / ref_mean))
+
+    if nsamples > 1:
+        cov = np.cov(np.vstack((diff2, ref2)), ddof=1) / nsamples
+        drel_ddiff = 0.5 / np.sqrt(diff_mean * ref_mean)
+        drel_dref = -0.5 * np.sqrt(diff_mean) / (ref_mean ** 1.5)
+        rel_var = (
+            drel_ddiff * drel_ddiff * cov[0, 0]
+            + drel_dref * drel_dref * cov[1, 1]
+            + 2.0 * drel_ddiff * drel_dref * cov[0, 1]
+        )
+        rel_std = float(np.sqrt(max(rel_var, 0.0)))
+    else:
+        rel_std = 0.0
+
+    return rel_diff, rel_std
+
+
+def get_gdf_tensor_k1q(gdf, kpts_int, kmesh, C1=None, C2=None, progressbar=False):
+    kpts = np.asarray(gdf.kpts)
+    nkpts = len(kpts)
+    nao = gdf.cell.nao_nr()
+    kpt_map = {tuple(k): i for i, k in enumerate(kpts_int)}
+    cderi = gdf.cderi_array()
+    naux = cderi.load(kpts[0], kpts[0]).shape[0]
+    if C1 is None:
+        n1 = nao
+    else:
+        n1 = C1.shape[2]
+    if C2 is None:
+        n2 = nao
+    else:
+        n2 = C2.shape[2]
+    out = np.empty((nkpts, nkpts, naux, n1, n2), dtype=np.complex128)
+
+    kq = [(k1, q) for k1 in range(nkpts) for q in range(nkpts)]
+    if progressbar:
+        import tqdm
+        kq = tqdm.tqdm(kq, desc="Loading GDF tensor L[k1,q]", unit="block")
+    for k1, q in kq:
+        k2_int = (kpts_int[k1] + kpts_int[q]) % kmesh
+        k2 = kpt_map[tuple(k2_int)]
+
+        block = cderi.load(kpts[k1], kpts[k2])
+        if block.shape[1] == nao * (nao + 1) // 2:
+            block = lib.unpack_tril(block)
+        block = block.reshape(naux, nao, nao)
+        if C1 is not None:
+            block = np.einsum("ca,xcd->xad", C1[k1].conj(), block, optimize=True)
+        if C2 is not None:
+            block = np.einsum("db,xad->xab", C2[k2], block, optimize=True)
+        out[k1, q] = block
+    return out
+
+
+def gdf_k1q_to_full(tensor_k1q, kpts_int, kmesh):
+    nkpts = tensor_k1q.shape[0]
+    assert tensor_k1q.shape[1] == nkpts
+    kpt_map = {tuple(k): i for i, k in enumerate(kpts_int)}
+
+    k1_all = np.arange(nkpts)[:, None]
+    q_all = np.arange(nkpts)[None, :]
+    k2_int = (kpts_int[k1_all] + kpts_int[q_all]) % kmesh
+    k2_all = np.empty((nkpts, nkpts), dtype=np.int64)
+    for k1 in range(nkpts):
+        for q in range(nkpts):
+            k2_all[k1, q] = kpt_map[tuple(k2_int[k1, q])]
+
+    tensor = np.zeros((nkpts, nkpts, nkpts) + tensor_k1q.shape[2:], dtype=tensor_k1q.dtype)
+    tensor[k1_all, k2_all, q_all] = tensor_k1q
+    return tensor
+
+
+def get_gdf_eri_eigvalsh(gdf, kpts_int, kmesh, C1=None, C2=None, progressbar=False):
+    kpts = np.asarray(gdf.kpts)
+    nkpts = len(kpts)
+    nao = gdf.cell.nao_nr()
+    kpt_map = {tuple(k): i for i, k in enumerate(kpts_int)}
+    cderi = gdf.cderi_array()
+    naux = cderi.load(kpts[0], kpts[0]).shape[0]
+    if C1 is None:
+        n1 = nao
+    else:
+        n1 = C1.shape[2]
+    if C2 is None:
+        n2 = nao
+    else:
+        n2 = C2.shape[2]
+    metric = np.zeros((nkpts, naux, naux), dtype=np.complex128)
+
+    kij = [(ki, kj) for ki in range(nkpts) for kj in range(nkpts)]
+    if progressbar:
+        import tqdm
+        kij = tqdm.tqdm(kij, desc="Accumulating GDF metric blocks", unit="block")
+    for ki, kj in kij:
+        block = cderi.load(kpts[ki], kpts[kj])
+        if block.shape[1] == nao * (nao + 1) // 2:
+            block = lib.unpack_tril(block)
+        block = block.reshape(naux, nao, nao).transpose(1, 2, 0)
+        if C1 is not None:
+            block = np.einsum("pi,pqL->iqL", C1[ki].conj(), block, optimize=True)
+        if C2 is not None:
+            block = np.einsum("qj,iqL->ijL", C2[kj], block, optimize=True)
+        q_int = (kpts_int[kj] - kpts_int[ki]) % kmesh
+        q = kpt_map[tuple(q_int)]
+        block = block.reshape(n1 * n2, naux)
+        metric[q] += block.conj().T @ block
+
+    return np.linalg.eigvalsh(metric)
+
+
 def shape2stride(shape):
     stride = [1]
     for dim in shape[1:][::-1]:
@@ -337,6 +488,78 @@ def thc_ovvo_error2_from_mo(Xo_A, Xv_A, W_A, Xo_B, Xv_B, W_B, kmesh):
     return (aa + bb - 2.0 * ab.real).real
 
 
+def thc_full_inner_from_mo(X_A, W_A, X_B, W_B, kmesh):
+    return thc_ovvo_inner_from_mo(X_A, X_A, W_A, X_B, X_B, W_B, kmesh)
+
+
+def thc_inner_from_mo(X_A, W_A, X_B, W_B, kmesh):
+    return thc_ovvo_inner_from_mo(X_A, X_A, W_A, X_B, X_B, W_B, kmesh)
+
+
+@maybe_profile
+def thc_df_rhs_from_mo(X, L, kmesh):
+    nkpts, nip, nmo = X.shape
+    assert L.shape[0] == nkpts
+    assert L.shape[1] == nkpts
+    kmesh = tuple(int(x) for x in kmesh)
+    k = torch.arange(nkpts, device=X.device)
+    q_all = torch.arange(nkpts, device=X.device)
+    neg = negative_k(q_all, kmesh).to(device=X.device)
+
+    B = torch.zeros((nkpts, nip, nip), dtype=X.dtype, device=X.device)
+    for q in range(nkpts):
+        q_t = torch.tensor(q, device=X.device)
+        k2 = add_k(k, q_t, kmesh).to(device=X.device)
+        L12 = L[:, q]
+        A12 = torch.einsum("kIa,kIb,kxab->Ix", X, X[k2].conj(), L12)
+
+        qm = int(neg[q].item())
+        qm_t = torch.tensor(qm, device=X.device)
+        k4 = add_k(k, qm_t, kmesh).to(device=X.device)
+        L34 = L[:, qm]
+        A34 = torch.einsum("kIa,kIb,kxab->Ix", X, X[k4].conj(), L34)
+
+        B[q] = torch.einsum("Ix,Jx->IJ", A12, A34)
+    return B
+
+
+@maybe_profile
+def thc_df_inner_from_mo(X, W, L, kmesh):
+    B = thc_df_rhs_from_mo(X, L, kmesh)
+    return torch.sum(W.conj() * B)
+
+
+@maybe_profile
+def thc_df_solve_w_from_mo(X, L, kmesh, reg=None):
+    A = thc_ovvo_build_Lbar(X, X, X, X, kmesh)
+    B = thc_df_rhs_from_mo(X, L, kmesh)
+    W = torch_lstsq_oinv_PSD(A, B, reg=reg)
+    return W
+
+
+@maybe_profile
+def thc_df_solve_w_error2_from_mo(X, L, kmesh, df_norm2, reg=None):
+    A = thc_ovvo_build_Lbar(X, X, X, X, kmesh)
+    B = thc_df_rhs_from_mo(X, L, kmesh)
+    W = torch_lstsq_oinv_PSD(A, B, reg=reg)
+    ab = torch.sum(W.conj() * B).real
+    bb = ((W.conj().transpose(-1, -2) @ A @ W @ A.conj().transpose(-1, -2)).diagonal(dim1=-1, dim2=-2).sum()).real
+    error2 = (df_norm2 + bb - 2.0 * ab).real
+    return W, error2
+
+
+@maybe_profile
+def df_inner_from_mo(L_A, L_B, kmesh):
+    nkpts = L_A.shape[0]
+    assert L_A.shape[1] == nkpts
+    assert L_B.shape[0] == nkpts
+    assert L_B.shape[1] == nkpts
+    #kmesh = tuple(int(x) for x in kmesh)
+    neg = negative_k(torch.arange(nkpts, device=L_A.device), kmesh).to(device=L_A.device)
+    M = torch.einsum("kqxab,kqyab->qxy", L_A.conj(), L_B)
+    return torch.einsum("qxy,qxy->", M, M[neg])
+
+
 def is_k_ordered(kpts_int, kmesh):
     A = np.moveaxis(np.stack(np.meshgrid(*[np.arange(n) for n in kmesh], indexing='ij'), axis=0), 0, -1)
     B = kpts_int.reshape(tuple(kmesh) + (len(kmesh),))
@@ -437,199 +660,3 @@ def compare_two_isdf(isdf_ref, isdf, Cocc, Cvir, kmesh):
         kmesh,
     ).real
     return torch.sqrt(error2 / ref_norm2).item()
-
-
-def stochastic_eri_diff(df1, df2, mo_coeff_kpts, nsamples):
-    from pyscf.pbc import tools as pbctools
-
-    kpts = np.asarray(df1.kpts)
-    assert np.allclose(kpts, np.asarray(df2.kpts))
-
-    kmesh = pbctools.k2gamma.kpts_to_kmesh(df1.cell, kpts - kpts[0])
-    kmesh = np.asarray(kmesh, dtype=int)
-    kpts_int = np.round(df1.cell.get_scaled_kpts(kpts) * kmesh).astype(int) % kmesh
-    assert is_k_ordered(kpts_int, kmesh)
-
-    if isinstance(mo_coeff_kpts, np.ndarray) and mo_coeff_kpts.ndim == 3:
-        mo_coeff_kpts = [mo_coeff_kpts, ] * 4
-    else:
-        mo_coeff_kpts = list(mo_coeff_kpts)
-    assert len(mo_coeff_kpts) == 4
-
-    kpt_map = {tuple(k): i for i, k in enumerate(kpts_int)}
-    nkpts = len(kpts)
-    rng = np.random.default_rng()
-
-    diff2 = np.empty(nsamples, dtype=np.float64)
-    ref2 = np.empty(nsamples, dtype=np.float64)
-    import tqdm
-    for isample in tqdm.tqdm(range(nsamples)):
-        k1, k2, k3 = rng.integers(0, nkpts, size=3)
-        k4_int = (kpts_int[k1] - kpts_int[k2] + kpts_int[k3]) % kmesh
-        k4 = kpt_map[tuple(k4_int)]
-        kpts4 = kpts[[k1, k2, k3, k4]]
-        mo_coeff_sample = []
-        for mo, ki in zip(mo_coeff_kpts, (k1, k2, k3, k4)):
-            mo_coeff_sample.append(mo[ki])
-
-        eri1 = df1.ao2mo(mo_coeff_sample, kpts=kpts4).flatten()
-        eri2 = df2.ao2mo(mo_coeff_sample, kpts=kpts4).flatten()
-        diff2[isample] = np.linalg.norm(eri1 - eri2)**2
-        ref2[isample] = np.linalg.norm(eri1)**2
-
-    diff_mean = diff2.mean()
-    ref_mean = ref2.mean()
-    rel_diff = float(np.sqrt(diff_mean / ref_mean))
-
-    if nsamples > 1:
-        cov = np.cov(np.vstack((diff2, ref2)), ddof=1) / nsamples
-        drel_ddiff = 0.5 / np.sqrt(diff_mean * ref_mean)
-        drel_dref = -0.5 * np.sqrt(diff_mean) / (ref_mean ** 1.5)
-        rel_var = (
-            drel_ddiff * drel_ddiff * cov[0, 0]
-            + drel_dref * drel_dref * cov[1, 1]
-            + 2.0 * drel_ddiff * drel_dref * cov[0, 1]
-        )
-        rel_std = float(np.sqrt(max(rel_var, 0.0)))
-    else:
-        rel_std = 0.0
-
-    return rel_diff, rel_std
-
-
-def get_full_gdf_tensor(gdf, kpts_int, kmesh, C1=None, C2=None, progressbar=False):
-    kpts = np.asarray(gdf.kpts)
-    nkpts = len(kpts)
-    nao = gdf.cell.nao_nr()
-    kpt_map = {tuple(k): i for i, k in enumerate(kpts_int)}
-    cderi = gdf.cderi_array()
-    naux = cderi.load(kpts[0], kpts[0]).shape[0]
-    if C1 is None:
-        n1 = nao
-    else:
-        n1 = C1.shape[2]
-    if C2 is None:
-        n2 = nao
-    else:
-        n2 = C2.shape[2]
-    out = np.zeros((nkpts * n1, nkpts * n2, nkpts * naux), dtype=np.complex128)
-
-    kij = [(ki, kj) for ki in range(nkpts) for kj in range(nkpts)]
-    if progressbar:
-        import tqdm
-        kij = tqdm.tqdm(kij, desc="Loading GDF tensor blocks", unit="block")
-    for ki, kj in kij:
-        si = slice(ki * n1, (ki + 1) * n1)
-        sj = slice(kj * n2, (kj + 1) * n2)
-        block = cderi.load(kpts[ki], kpts[kj])
-        if block.shape[1] == nao * (nao + 1) // 2:
-            block = lib.unpack_tril(block)
-        block = block.reshape(naux, nao, nao).transpose(1, 2, 0)
-        if C1 is not None:
-            block = np.einsum("pi,pqL->iqL", C1[ki].conj(), block, optimize=True)
-        if C2 is not None:
-            block = np.einsum("qj,iqL->ijL", C2[kj], block, optimize=True)
-        q_int = (kpts_int[kj] - kpts_int[ki]) % kmesh
-        q = kpt_map[tuple(q_int)]
-        sq = slice(q * naux, (q + 1) * naux)
-        out[si, sj, sq] = block
-    return out
-
-
-def get_gdf_eri_eigvalsh(gdf, kpts_int, kmesh, C1=None, C2=None, progressbar=False):
-    kpts = np.asarray(gdf.kpts)
-    nkpts = len(kpts)
-    nao = gdf.cell.nao_nr()
-    kpt_map = {tuple(k): i for i, k in enumerate(kpts_int)}
-    cderi = gdf.cderi_array()
-    naux = cderi.load(kpts[0], kpts[0]).shape[0]
-    if C1 is None:
-        n1 = nao
-    else:
-        n1 = C1.shape[2]
-    if C2 is None:
-        n2 = nao
-    else:
-        n2 = C2.shape[2]
-    metric = np.zeros((nkpts, naux, naux), dtype=np.complex128)
-
-    kij = [(ki, kj) for ki in range(nkpts) for kj in range(nkpts)]
-    if progressbar:
-        import tqdm
-        kij = tqdm.tqdm(kij, desc="Accumulating GDF metric blocks", unit="block")
-    for ki, kj in kij:
-        block = cderi.load(kpts[ki], kpts[kj])
-        if block.shape[1] == nao * (nao + 1) // 2:
-            block = lib.unpack_tril(block)
-        block = block.reshape(naux, nao, nao).transpose(1, 2, 0)
-        if C1 is not None:
-            block = np.einsum("pi,pqL->iqL", C1[ki].conj(), block, optimize=True)
-        if C2 is not None:
-            block = np.einsum("qj,iqL->ijL", C2[kj], block, optimize=True)
-        q_int = (kpts_int[kj] - kpts_int[ki]) % kmesh
-        q = kpt_map[tuple(q_int)]
-        block = block.reshape(n1 * n2, naux)
-        metric[q] += block.conj().T @ block
-
-    return np.linalg.eigvalsh(metric)
-
-
-def borrow_ij_pairs(dim, q, bout, bin_all):
-    pairs = []
-    for bin_ in bin_all:
-        for i in range(dim):
-            for j in range(dim):
-                t = j - i - bin_
-                q_ = t % dim
-                bout_ = 1 if t < 0 else 0
-                if q_ == q and (bout is None or bout_ == bout):
-                    pairs.append((i, j))
-    return pairs
-
-
-def _mpo_borrow_block_norm_site(T, isite, nsite):
-    if T.ndim == 3 and isite == 0:
-        dim, _, right = T.shape
-        T = T.reshape(1, dim, dim, right)
-    elif T.ndim == 3 and isite == nsite - 1:
-        left, dim, _ = T.shape
-        T = T.reshape(left, dim, dim, 1)
-
-    left, dim, _, right = T.shape
-
-    if isite == 0:
-        bin_all = [0]
-    else:
-        bin_all = [0, 1]
-
-    if isite == nsite - 1:
-        bout_all = [None]
-    else:
-        bout_all = [0, 1]
-
-    norms = []
-    for q in range(dim):
-        for bout in bout_all:
-            pairs = borrow_ij_pairs(dim, q, bout, bin_all)
-            if pairs:
-                blocks = []
-                for i, j in pairs:
-                    blocks.append(T[:, i, j, :].reshape(left, right))
-                M = np.concatenate(blocks, axis=0)
-                norms.append(np.linalg.svd(M, compute_uv=False)[0])
-            else:
-                norms.append(0.0)
-    return max(norms), norms
-
-
-def mpo_borrow_block_norm(tensors, return_blocks=False):
-    nsite = len(tensors)
-    all_norms = []
-    all_block_norms = []
-    for isite, T in enumerate(tensors):
-        norm, block_norms = _mpo_borrow_block_norm_site(T, isite, nsite)
-        all_norms.append(norm)
-        all_block_norms.append(block_norms)
-    if return_blocks:
-        return all_norms, all_block_norms
-    return all_norms
