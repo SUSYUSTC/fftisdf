@@ -480,11 +480,10 @@ def thc_solve_w_error2_from_mo(X_ref, W_ref, X, kmesh, ref_norm2, reg=None):
 def thc_df_ov_build_A_from_mo(Xo, Xv, R, kmesh):
     nkpts = int(np.prod(kmesh))
     k = torch.arange(nkpts, device=Xo.device)
-    q = torch.arange(nkpts, device=Xo.device)
-    kq = add_k(k[:, None], q[None, :], kmesh).to(device=Xo.device)
-
-    Xv2 = Xv[kq]
-    A = torch.einsum("kIi,kqIa,kqxia->qIx", Xo, Xv2.conj(), R)
+    A = torch.empty((nkpts, Xo.shape[1], R.shape[2]), dtype=R.dtype, device=R.device)
+    for q in range(nkpts):
+        kq = add_k(k, q, kmesh).to(device=Xo.device)
+        A[q] = torch.einsum("kIi,kIa,kxia->Ix", Xo, Xv[kq].conj(), R[:, q])
     return A
 
 
