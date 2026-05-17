@@ -557,8 +557,12 @@ def thc_df_solve_w_error2_from_mo(X, R, kmesh, df_norm2, reg=None):
 
 @maybe_profile
 def df_inner_from_mo(R, kmesh):
-    M = torch.einsum("kqxab,kqyab->qxy", R.conj(), R)
-    return torch.einsum("qxy,qxy->", M, M.conj())
+    nkpts = int(np.prod(kmesh))
+    result = torch.zeros((), dtype=R.dtype, device=R.device)
+    for q in range(nkpts):
+        M = torch.einsum("kxab,kyab->xy", R[:, q].conj(), R[:, q])
+        result = result + torch.einsum("xy,xy->", M, M.conj())
+    return result
 
 
 def is_k_ordered(kpts_int, kmesh):
