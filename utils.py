@@ -76,7 +76,11 @@ def ravel_multi_index(indices, shape):
 def matrix_operation(A, func):
     eigvals, eigvecs = np.linalg.eigh(A)
     eigvals = func(eigvals)
-    return eigvecs @ np.diag(eigvals) @ eigvecs.conj().T
+    return np.einsum("...ai,...i,...bi->...ab", eigvecs, eigvals, eigvecs.conj(), optimize=True)
+
+
+def matrix_power(A, power):
+    return matrix_operation(A, lambda x: x ** power)
 
 
 def make_df_eig():
@@ -168,11 +172,46 @@ def stochastic_eri_diff(df1, df2, mo_coeff_kpts, nsamples):
     return rel_diff, rel_std
 
 
-def get_gdf_tensor_k1q(gdf, kpts_int, kmesh, C1=None, C2=None, progressbar=False):
+def _get_kpt_map(kpts_int):
+    return {tuple(k): i for i, k in enumerate(kpts_int)}
+
+
+def _lookup_kpts(kpts_int_query, kpts_int):
+    kpt_map = _get_kpt_map(kpts_int)
+    idx = np.empty(kpts_int_query.shape[:-1], dtype=np.int64)
+    for i in np.ndindex(idx.shape):
+        idx[i] = kpt_map[tuple(kpts_int_query[i])]
+    return idx
+
+
+def _get_gdf_layout_indices(kpts_int, kmesh, layout):
+    nkpts = len(kpts_int)
+    idx0 = np.arange(nkpts)[:, None]
+    idx1 = np.arange(nkpts)[None, :]
+    if layout == "k1q":
+        k1 = np.broadcast_to(idx0, (nkpts, nkpts))
+        q = np.broadcast_to(idx1, (nkpts, nkpts))
+        k2_int = (kpts_int[k1] + kpts_int[q]) % kmesh
+        k2 = _lookup_kpts(k2_int, kpts_int)
+    elif layout == "k1k2":
+        k1 = np.broadcast_to(idx0, (nkpts, nkpts))
+        k2 = np.broadcast_to(idx1, (nkpts, nkpts))
+        q_int = (kpts_int[k2] - kpts_int[k1]) % kmesh
+        q = _lookup_kpts(q_int, kpts_int)
+    elif layout == "k2q":
+        k2 = np.broadcast_to(idx0, (nkpts, nkpts))
+        q = np.broadcast_to(idx1, (nkpts, nkpts))
+        k1_int = (kpts_int[k2] - kpts_int[q]) % kmesh
+        k1 = _lookup_kpts(k1_int, kpts_int)
+    else:
+        raise ValueError("layout should be k1q, k1k2, or k2q")
+    return k1, k2, q
+
+
+def get_gdf_tensor_compact(gdf, kpts_int, kmesh, C1=None, C2=None, *, layout, progressbar=False):
     kpts = np.asarray(gdf.kpts)
     nkpts = len(kpts)
     nao = gdf.cell.nao_nr()
-    kpt_map = {tuple(k): i for i, k in enumerate(kpts_int)}
     cderi = gdf.cderi_array()
     naux = cderi.load(kpts[0], kpts[0]).shape[0]
     if C1 is None:
@@ -183,16 +222,16 @@ def get_gdf_tensor_k1q(gdf, kpts_int, kmesh, C1=None, C2=None, progressbar=False
         n2 = nao
     else:
         n2 = C2.shape[2]
-    out = np.empty((nkpts, nkpts, naux, n1, n2), dtype=np.complex128)
+    R = np.empty((nkpts, nkpts, naux, n1, n2), dtype=np.complex128)
 
-    kq = [(k1, q) for k1 in range(nkpts) for q in range(nkpts)]
+    k1_all, k2_all, q_all = _get_gdf_layout_indices(kpts_int, kmesh, layout)
+    pairs = [(i, j) for i in range(nkpts) for j in range(nkpts)]
     if progressbar:
         import tqdm
-        kq = tqdm.tqdm(kq, desc="Loading GDF tensor L[k1,q]", unit="block")
-    for k1, q in kq:
-        k2_int = (kpts_int[k1] + kpts_int[q]) % kmesh
-        k2 = kpt_map[tuple(k2_int)]
-
+        pairs = tqdm.tqdm(pairs, desc=f"Loading GDF tensor R[{layout}]", unit="block")
+    for i, j in pairs:
+        k1 = k1_all[i, j]
+        k2 = k2_all[i, j]
         block = cderi.load(kpts[k1], kpts[k2])
         if block.shape[1] == nao * (nao + 1) // 2:
             block = lib.unpack_tril(block)
@@ -201,25 +240,16 @@ def get_gdf_tensor_k1q(gdf, kpts_int, kmesh, C1=None, C2=None, progressbar=False
             block = np.einsum("ca,xcd->xad", C1[k1].conj(), block, optimize=True)
         if C2 is not None:
             block = np.einsum("db,xad->xab", C2[k2], block, optimize=True)
-        out[k1, q] = block
-    return out
+        R[i, j] = block
+    return R
 
 
-def gdf_k1q_to_full(tensor_k1q, kpts_int, kmesh):
-    nkpts = tensor_k1q.shape[0]
-    assert tensor_k1q.shape[1] == nkpts
-    kpt_map = {tuple(k): i for i, k in enumerate(kpts_int)}
-
-    k1_all = np.arange(nkpts)[:, None]
-    q_all = np.arange(nkpts)[None, :]
-    k2_int = (kpts_int[k1_all] + kpts_int[q_all]) % kmesh
-    k2_all = np.empty((nkpts, nkpts), dtype=np.int64)
-    for k1 in range(nkpts):
-        for q in range(nkpts):
-            k2_all[k1, q] = kpt_map[tuple(k2_int[k1, q])]
-
-    tensor = np.zeros((nkpts, nkpts, nkpts) + tensor_k1q.shape[2:], dtype=tensor_k1q.dtype)
-    tensor[k1_all, k2_all, q_all] = tensor_k1q
+def gdf_compact_to_full(tensor_in, kpts_int, kmesh, *, layout):
+    nkpts = tensor_in.shape[0]
+    assert tensor_in.shape[1] == nkpts
+    k1_all, k2_all, q_all = _get_gdf_layout_indices(kpts_int, kmesh, layout)
+    tensor = np.zeros((nkpts, nkpts, nkpts) + tensor_in.shape[2:], dtype=tensor_in.dtype)
+    tensor[k1_all, k2_all, q_all] = tensor_in
     return tensor
 
 
