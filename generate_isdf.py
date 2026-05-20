@@ -96,5 +96,5 @@ else:
     isdf_ov_ref.verbose = 0
     isdf_ov_ref.build()
     print("Utility comparison against cisdf=20 reference:", flush=True)
-    rel_error = utils.compare_two_isdf(isdf_ov_ref, isdf_ov, Cocc, Cvir, kmesh)
+    rel_error = utils.compare_two_isdf(isdf_ov_ref, isdf_ov, kmesh, C1=Cocc, C2=Cvir)
     print(f"ovov ||ISDF(OV, {str(reg):6s}) - ref|| / ||ref|| = %16.8e" % rel_error, flush=True)

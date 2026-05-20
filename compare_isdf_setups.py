@@ -101,7 +101,7 @@ else:
     isdf_ao = fft.ISDF(cell, kpts)
     isdf_ao.verbose = 0
     isdf_ao.build(cisdf=cisdf)
-    diff_isdf_ao = utils.compare_two_isdf(isdf_ref, isdf_ao, Cocc, Cvir, kmesh)
+    diff_isdf_ao = utils.compare_two_isdf(isdf_ref, isdf_ao, kmesh, C1=Cocc, C2=Cvir)
     print('Xo norm', np.linalg.svd(isdf_ao.inpv_kpt @ Cocc)[1].max())
     print('Xv norm', np.linalg.svd(isdf_ao.inpv_kpt @ Cvir)[1].max())
     print()
@@ -116,7 +116,7 @@ else:
         if reg == 0:
             print('Xo norm', np.linalg.svd(isdf_ov.inpv_kpt @ Cocc)[1].max())
             print('Xv norm', np.linalg.svd(isdf_ov.inpv_kpt @ Cvir)[1].max())
-        diff_isdf_ov = utils.compare_two_isdf(isdf_ref, isdf_ov, Cocc, Cvir, kmesh)
+        diff_isdf_ov = utils.compare_two_isdf(isdf_ref, isdf_ov, kmesh, C1=Cocc, C2=Cvir)
         print(f"ovvo ||ISDF(OV, {str(reg):6s}) - ref|| / ||ref|| = %16.8e" % diff_isdf_ov, flush=True)
         print(f'ISDF(OV, {str(reg):6s}) Coulomb norm', np.abs(np.linalg.eigvalsh(isdf_ov.coul_kpt)[1]).max() / nkpts)
         print()

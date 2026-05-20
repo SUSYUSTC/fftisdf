@@ -674,24 +674,36 @@ def mp2_from_ovov_full(eri_ovov_full, mo_energy, nocc):
     return emp2
 
 
-def compare_two_isdf(isdf_ref, isdf, Cocc, Cvir, kmesh):
+def compare_two_isdf(isdf_ref, isdf, kmesh, C1=None, C2=None):
     X_ref = torch.from_numpy(np.asarray(isdf_ref.inpv_kpt)).to(dtype=torch.complex128)
     W_ref = torch.from_numpy(np.asarray(isdf_ref.coul_kpt)).to(dtype=torch.complex128)
     X = torch.from_numpy(np.asarray(isdf.inpv_kpt)).to(dtype=torch.complex128)
     W = torch.from_numpy(np.asarray(isdf.coul_kpt)).to(dtype=torch.complex128)
-    Cocc_t = torch.from_numpy(np.asarray(Cocc)).to(dtype=torch.complex128)
-    Cvir_t = torch.from_numpy(np.asarray(Cvir)).to(dtype=torch.complex128)
 
-    Xo_ref, Xv_ref = X_ref @ Cocc_t, X_ref @ Cvir_t
-    Xo, Xv = X @ Cocc_t, X @ Cvir_t
+    if C1 is None:
+        X1_ref = X_ref
+        X1 = X
+    else:
+        C1_t = torch.from_numpy(np.asarray(C1)).to(dtype=torch.complex128)
+        X1_ref = X_ref @ C1_t
+        X1 = X @ C1_t
+
+    if C2 is None:
+        X2_ref = X_ref
+        X2 = X
+    else:
+        C2_t = torch.from_numpy(np.asarray(C2)).to(dtype=torch.complex128)
+        X2_ref = X_ref @ C2_t
+        X2 = X @ C2_t
+
     ref_norm2 = thc_ovvo_inner_from_mo(
-        Xo_ref, Xv_ref, W_ref,
-        Xo_ref, Xv_ref, W_ref,
+        X1_ref, X2_ref, W_ref,
+        X1_ref, X2_ref, W_ref,
         kmesh,
     ).real
     error2 = thc_ovvo_error2_from_mo(
-        Xo_ref, Xv_ref, W_ref,
-        Xo, Xv, W,
+        X1_ref, X2_ref, W_ref,
+        X1, X2, W,
         kmesh,
     ).real
     return torch.sqrt(error2 / ref_norm2).item()
