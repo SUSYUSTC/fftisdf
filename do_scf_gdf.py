@@ -5,36 +5,28 @@ import signal
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 import numpy as np
-from pyscf.pbc import gto, scf, df
+from pyscf.pbc import scf, df
+import system_common
 
-kmesh = (int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]))
-basis = sys.argv[4]
+system = sys.argv[1]
+kmesh = (int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]))
+basis = sys.argv[5]
+cell = system_common.make_cell(system, basis, verbose=0)
 
-a = 1.7834
-lv = np.ones((3, 3)) * a
-lv -= np.diag([a, a, a])
-atom = [("C", [0.00000, 0.00000, 0.00000])]
-atom += [("C", [0.5 * a, 0.5 * a, 0.5 * a])]
-
-cell = gto.Cell()
-cell.unit = "A"
-cell.atom = atom
-cell.a = lv
-cell.basis = basis
-cell.pseudo = "gth-pbe"
-cell.ke_cutoff = 40.0
-cell.verbose = 0
-cell.build()
-
-klabel = f"{kmesh[0]}x{kmesh[1]}x{kmesh[2]}"
+klabel = system_common.get_klabel(kmesh)
 kpts = cell.make_kpts(kmesh)
 kpts_int = np.round(cell.get_scaled_kpts(kpts) * kmesh).astype(int) % kmesh
 
 S = cell.pbc_intor("int1e_ovlp", kpts=kpts)
 print('min S eigval', np.linalg.eigvalsh(S).min())
 
-scf_pkl = f"data_GDF/SCF_diamond_{klabel}_{cell.basis}_ke{cell.ke_cutoff}.pkl"
-gdf_chk = f"data_GDF/GDF_diamond_{klabel}_{cell.basis}.chk"
+data_dir = system_common.get_data_dir(system, basis)
+scf_pkl = os.path.join(data_dir, f"SCF_{klabel}.pkl")
+gdf_chk = system_common.resolve_path(
+    system, basis,
+    f"GDF_{klabel}.chk",
+    f"GDF_{system}_{klabel}_{basis}.chk",
+)
 
 
 def make_gdf():

@@ -3,27 +3,16 @@ import os
 import pickle
 
 import numpy as np
-from pyscf.pbc import gto, scf, df
+from pyscf.pbc import scf, df
+import system_common
 
-kmesh = (int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]))
-klabel = f"{kmesh[0]}x{kmesh[1]}x{kmesh[2]}"
-basis = sys.argv[4]
-
-a = 1.7834
-lv = np.ones((3, 3)) * a
-lv -= np.diag([a, a, a])
-atom = [("C", [0.00000, 0.00000, 0.00000])]
-atom += [("C", [0.5 * a, 0.5 * a, 0.5 * a])]
-
-cell = gto.Cell()
-cell.unit = "A"
-cell.atom = atom
-cell.a = lv
-cell.basis = basis
-cell.pseudo = "gth-pbe"
-cell.ke_cutoff = 40.0
-cell.verbose = 0
-cell.build()
+system = sys.argv[1]
+kmesh = (int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]))
+klabel = system_common.get_klabel(kmesh)
+basis = sys.argv[5]
+cell = system_common.make_cell(system, basis, verbose=0)
+print(cell.mesh)
+xc = system_common.load_xc(system, basis)
 
 kpts = cell.make_kpts(kmesh)
 kpts_int = np.round(cell.get_scaled_kpts(kpts) * kmesh).astype(int) % kmesh
@@ -31,8 +20,9 @@ kpts_int = np.round(cell.get_scaled_kpts(kpts) * kmesh).astype(int) % kmesh
 S = cell.pbc_intor("int1e_ovlp", kpts=kpts)
 print('min S eigval', np.linalg.eigvalsh(S).min())
 
-pbe_pkl = f"data_GDF/PBE_diamond_{klabel}_{cell.basis}_ke{cell.ke_cutoff}.pkl"
-gdf_chk = f"data_GDF/GDF_diamond_{klabel}_{cell.basis}.chk"
+data_dir = system_common.get_data_dir(system, basis)
+dft_pkl = os.path.join(data_dir, f"DFT_{klabel}.pkl")
+gdf_chk = os.path.join(data_dir, f"GDF_{klabel}.chk")
 
 
 def make_gdf():
@@ -50,15 +40,14 @@ def make_gdf():
     return with_df
 
 
-mf = scf.KRKS(cell, kpts, exxdiv='ewald', xc='PBE')
-mf.conv_tol = 1e-6
-mf.max_cycle = 50
+mf = scf.KRKS(cell, kpts, exxdiv='ewald', xc=xc)
 mf.verbose = 4
+print("XC =", xc, flush=True)
 print("GDF chkfile =", gdf_chk, flush=True)
 mf.with_df = make_gdf()
 print("Running SCF ...", flush=True)
 mf.kernel()
 
-with open(pbe_pkl, "wb") as f:
+with open(dft_pkl, "wb") as f:
     pickle.dump(mf, f)
-print("Saved PBE pickle =", pbe_pkl, flush=True)
+print("Saved DFT pickle =", dft_pkl, flush=True)

@@ -1,19 +1,22 @@
 import sys
+import os
 import pickle
 import numpy as np
 from pyscf import lib
 import utils
+import system_common
 
 
-kmesh = (int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]))
-klabel = f"{kmesh[0]}x{kmesh[1]}x{kmesh[2]}"
-basis = sys.argv[4]
-ke_cutoff = 40.0
+system = sys.argv[1]
+kmesh = (int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]))
+klabel = system_common.get_klabel(kmesh)
+basis = sys.argv[5]
 
-gdf_chk = f"data_GDF/GDF_diamond_{klabel}_{basis}.chk"
-pbe_pkl = f"data_GDF/PBE_diamond_{klabel}_{basis}_ke{ke_cutoff}.pkl"
-gw_path = f"data_GDF/GWenergy_diamond_{klabel}_{basis}.npy"
-screening_path = f"data_GDF/screening_eps_diamond_{klabel}_{basis}.npy"
+data_dir = system_common.get_data_dir(system, basis)
+gdf_chk = os.path.join(data_dir, f"GDF_{klabel}.chk")
+dft_pkl = os.path.join(data_dir, f"DFT_{klabel}.pkl")
+gw_path = os.path.join(data_dir, f"GWenergy_{klabel}.npy")
+screening_path = os.path.join(data_dir, f"screening_eps_{klabel}.npy")
 
 
 def get_kpts_int(cell, kpts, kmesh):
@@ -42,7 +45,7 @@ def get_Lia_block(cderi, kpts, mo_coeff, ki, kj, nocc):
     return Lia
 
 
-with open(pbe_pkl, "rb") as f:
+with open(dft_pkl, "rb") as f:
     mf = pickle.load(f)
 mf.with_df._cderi = gdf_chk
 gw_energy = np.load(gw_path)
