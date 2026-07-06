@@ -21,7 +21,7 @@ with open(dft_pkl, "rb") as f:
 
 gw_path = os.path.join(data_dir, f"GWenergy_{klabel}.npy")
 
-fc = False
+fc = True
 gw = KRGWAC(mf)
 gw.fc = fc
 gw.verbose = 5
