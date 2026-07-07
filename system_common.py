@@ -26,8 +26,8 @@ _basis_variant_cache = {}
 
 def get_data_dir(system, basis, suffix=None):
     if suffix is None:
-        return f"data_{system}_{basis}"
-    return f"data_{system}_{basis}_{suffix}"
+        return os.path.abspath(f"data_{system}_{basis}")
+    return os.path.abspath(f"data_{system}_{basis}_{suffix}")
 
 
 def ensure_data_dir(system, basis, suffix=None):

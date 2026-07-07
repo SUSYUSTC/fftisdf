@@ -25,6 +25,7 @@ suffix = args.suffix
 data_dir = system_common.get_data_dir(system, basis, suffix=suffix)
 dft_pkl = os.path.join(data_dir, f"DFT_{klabel}.pkl")
 gdf_chk = os.path.join(data_dir, f"GDF_{klabel}.chk")
+gw_cache_dir = os.path.join(data_dir, f"GWcache_{klabel}")
 with open(dft_pkl, "rb") as f:
     mf = pickle.load(f)
     mf.with_df._cderi = gdf_chk
@@ -35,7 +36,12 @@ fc = True
 gw = KRGWAC(mf)
 gw.fc = fc
 gw.verbose = 5
+gw.writefile = 1
+os.makedirs(gw_cache_dir, exist_ok=True)
+cwd = os.getcwd()
+os.chdir(gw_cache_dir)
 gw.kernel()
+os.chdir(cwd)
 
 from mpi4py import MPI
 rank = MPI.COMM_WORLD.Get_rank()
