@@ -24,12 +24,14 @@ ccgto_basis_map = {
 _basis_variant_cache = {}
 
 
-def get_data_dir(system, basis):
-    return f"data_{system}_{basis}"
+def get_data_dir(system, basis, suffix=None):
+    if suffix is None:
+        return f"data_{system}_{basis}"
+    return f"data_{system}_{basis}_{suffix}"
 
 
-def ensure_data_dir(system, basis):
-    data_dir = get_data_dir(system, basis)
+def ensure_data_dir(system, basis, suffix=None):
+    data_dir = get_data_dir(system, basis, suffix=suffix)
     os.makedirs(data_dir, exist_ok=True)
     return data_dir
 
@@ -45,8 +47,8 @@ def read_text_if_exists(path):
     return None
 
 
-def load_settings(system, basis):
-    path = os.path.join(get_data_dir(system, basis), "settings.pydata")
+def load_settings(system, basis, suffix=None):
+    path = os.path.join(get_data_dir(system, basis, suffix=suffix), "settings.pydata")
     with open(path, "r") as f:
         settings = ast.literal_eval(f.read())
     return settings
@@ -69,8 +71,8 @@ def load_lattice(path):
     return np.loadtxt(path)
 
 
-def load_structure(system, basis):
-    data_dir = get_data_dir(system, basis)
+def load_structure(system, basis, suffix=None):
+    data_dir = get_data_dir(system, basis, suffix=suffix)
     xyz_path = os.path.join(data_dir, f"{system}_prim.xyz")
     lattice_path = os.path.join(data_dir, f"{system}_prim.lattice")
     atom = load_xyz(xyz_path)
@@ -78,23 +80,23 @@ def load_structure(system, basis):
     return atom, lattice
 
 
-def load_pseudo(system, basis):
-    settings = load_settings(system, basis)
+def load_pseudo(system, basis, suffix=None):
+    settings = load_settings(system, basis, suffix=suffix)
     return settings["pseudo_potential"]
 
 
-def load_xc(system, basis):
-    settings = load_settings(system, basis)
+def load_xc(system, basis, suffix=None):
+    settings = load_settings(system, basis, suffix=suffix)
     return settings["xc"]
 
 
-def load_setting(system, basis, name):
-    settings = load_settings(system, basis)
+def load_setting(system, basis, name, suffix=None):
+    settings = load_settings(system, basis, suffix=suffix)
     return settings.get("scf", {}).get(name)
 
 
-def load_cell_setting(system, basis, name):
-    settings = load_settings(system, basis)
+def load_cell_setting(system, basis, name, suffix=None):
+    settings = load_settings(system, basis, suffix=suffix)
     return settings.get("cell", {}).get(name)
 
 
@@ -171,9 +173,9 @@ def load_basis(atom, basis_name, pseudo):
     return basis_dict
 
 
-def make_cell(system, basis, verbose=0):
-    atom, lattice = load_structure(system, basis)
-    settings = load_settings(system, basis)
+def make_cell(system, basis, verbose=0, suffix=None):
+    atom, lattice = load_structure(system, basis, suffix=suffix)
+    settings = load_settings(system, basis, suffix=suffix)
     pseudo = settings["pseudo_potential"]
     basis_input = load_basis(atom, basis, pseudo)
 

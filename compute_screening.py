@@ -1,18 +1,27 @@
-import sys
 import os
 import pickle
+import argparse
 import numpy as np
 from pyscf import lib
 import utils
 import system_common
 
+parser = argparse.ArgumentParser()
+parser.add_argument("system")
+parser.add_argument("kx", type=int)
+parser.add_argument("ky", type=int)
+parser.add_argument("kz", type=int)
+parser.add_argument("basis")
+parser.add_argument("-suffix", default=None)
+args = parser.parse_args()
 
-system = sys.argv[1]
-kmesh = (int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]))
+system = args.system
+kmesh = (args.kx, args.ky, args.kz)
 klabel = system_common.get_klabel(kmesh)
-basis = sys.argv[5]
+basis = args.basis
+suffix = args.suffix
 
-data_dir = system_common.get_data_dir(system, basis)
+data_dir = system_common.get_data_dir(system, basis, suffix=suffix)
 gdf_chk = os.path.join(data_dir, f"GDF_{klabel}.chk")
 dft_pkl = os.path.join(data_dir, f"DFT_{klabel}.pkl")
 gw_path = os.path.join(data_dir, f"GWenergy_{klabel}.npy")

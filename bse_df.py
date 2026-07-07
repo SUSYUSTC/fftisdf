@@ -163,6 +163,7 @@ parser.add_argument("kz", type=int)
 parser.add_argument("basis")
 parser.add_argument("-cuda", type=int, default=None)
 parser.add_argument("-nroots", type=int, default=1)
+parser.add_argument("-suffix", default=None)
 parser.add_argument("--indirect", action="store_true")
 args = parser.parse_args()
 
@@ -172,9 +173,10 @@ nroot = args.nroots
 system = args.system
 kmesh = (args.kx, args.ky, args.kz)
 basis = args.basis
+suffix = args.suffix
 TDA = True
 klabel = system_common.get_klabel(kmesh)
-data_dir = system_common.get_data_dir(system, basis)
+data_dir = system_common.get_data_dir(system, basis, suffix=suffix)
 dft_pkl = os.path.join(data_dir, f"DFT_{klabel}.pkl")
 gdf_chk = os.path.join(data_dir, f"GDF_{klabel}.chk")
 gw_path = os.path.join(data_dir, f"GWenergy_{klabel}.npy")

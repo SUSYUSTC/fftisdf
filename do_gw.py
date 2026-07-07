@@ -1,18 +1,28 @@
-import sys
 import os
 import pickle
+import argparse
 import numpy as np
 from fcdmft.gw.pbc.krgw_ac import KRGWAC
 import threadpoolctl
 import system_common
 threadpoolctl.threadpool_limits(1)
 
-system = sys.argv[1]
-kmesh = (int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]))
-klabel = system_common.get_klabel(kmesh)
-basis = sys.argv[5]
+parser = argparse.ArgumentParser()
+parser.add_argument("system")
+parser.add_argument("kx", type=int)
+parser.add_argument("ky", type=int)
+parser.add_argument("kz", type=int)
+parser.add_argument("basis")
+parser.add_argument("-suffix", default=None)
+args = parser.parse_args()
 
-data_dir = system_common.get_data_dir(system, basis)
+system = args.system
+kmesh = (args.kx, args.ky, args.kz)
+klabel = system_common.get_klabel(kmesh)
+basis = args.basis
+suffix = args.suffix
+
+data_dir = system_common.get_data_dir(system, basis, suffix=suffix)
 dft_pkl = os.path.join(data_dir, f"DFT_{klabel}.pkl")
 gdf_chk = os.path.join(data_dir, f"GDF_{klabel}.chk")
 with open(dft_pkl, "rb") as f:
