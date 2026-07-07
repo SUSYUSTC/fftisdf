@@ -164,6 +164,8 @@ parser.add_argument("basis")
 parser.add_argument("-cuda", type=int, default=None)
 parser.add_argument("-nroots", type=int, default=1)
 parser.add_argument("-suffix", default=None)
+parser.add_argument("--use-Edft", action="store_true")
+parser.add_argument("--unscreen", action="store_true")
 parser.add_argument("--indirect", action="store_true")
 args = parser.parse_args()
 
@@ -174,6 +176,8 @@ system = args.system
 kmesh = (args.kx, args.ky, args.kz)
 basis = args.basis
 suffix = args.suffix
+use_Edft = args.use_Edft
+unscreen = args.unscreen
 TDA = True
 klabel = system_common.get_klabel(kmesh)
 data_dir = system_common.get_data_dir(system, basis, suffix=suffix)
@@ -191,35 +195,38 @@ kpts = np.asarray(mf.kpts)
 kpts_int = get_kpts_int(mf.cell, kpts, kmesh)
 mo_energy = np.load(gw_path)
 eps = np.load(eps_path)
+mo_energy_qp = np.asarray(mf.mo_energy) if use_Edft else mo_energy
 nocc = mf.cell.nelectron // 2
 nkpts = len(kpts)
 
 R = build_R(mf, kpts_int, kmesh)
-R_screen = build_R_screen(R, eps, kpts_int, kmesh)
+R_screen = R if unscreen else build_R_screen(R, eps, kpts_int, kmesh)
 kq = build_kq_map(kmesh).to(device=device)
 
 print("kmesh", kmesh)
 print("basis", basis)
 print("cuda", args.cuda)
 print("nroot", nroot)
+print("use_Edft", use_Edft)
+print("unscreen", unscreen)
 print("indirect", args.indirect)
 print("TDA", TDA)
-print("nocc", nocc, "nmo", mo_energy.shape[-1], "nkpts", nkpts)
+print("nocc", nocc, "nmo", mo_energy_qp.shape[-1], "nkpts", nkpts)
 print("SCF energy", mf.e_tot)
 
 if args.indirect:
-    q_indirect, e0_all = get_indirect_q(nocc, mo_energy, kq)
+    q_indirect, e0_all = get_indirect_q(nocc, mo_energy_qp, kq)
     q_int = np.unravel_index(q_indirect, kmesh)
     kq_q = kq[:, q_indirect]
     Vovov = build_Vovov_q(nocc, R, kq_q)
     Woovv = build_Woovv_q(nocc, R_screen, kq_q)
-    eia = get_eia_q(nocc, mo_energy, kq_q)
+    eia = get_eia_q(nocc, mo_energy_qp, kq_q)
     eia_gw = np.sort(eia.detach().cpu().numpy().reshape(-1))
     print("indirect q", q_indirect, "q_int", q_int)
-    print("lowest GW excitation by q", e0_all)
+    print("lowest QP excitation by q", e0_all)
     print()
     print("q", q_indirect, "q_int", q_int)
-    print("GW excitation", eia_gw[:nroot])
+    print("QP excitation", eia_gw[:nroot])
     e, vec = solve_tda(Vovov, Woovv, eia)
     print()
     print("singlet", e[:nroot])
@@ -227,10 +234,10 @@ if args.indirect:
 else:
     Vovov = build_Vovov(nocc, R)
     Woovv = build_Woovv(nocc, R_screen)
-    eia = get_eia(nocc, mo_energy)
-    eia_gw = mo_energy[:, None, nocc:] - mo_energy[:, :nocc, None]
+    eia = get_eia(nocc, mo_energy_qp)
+    eia_gw = mo_energy_qp[:, None, nocc:] - mo_energy_qp[:, :nocc, None]
     eia_gw = np.sort(eia_gw.reshape(-1))
-    print("GW excitation Q=0", eia_gw[:nroot])
+    print("QP excitation Q=0", eia_gw[:nroot])
     e, vec = solve_tda(Vovov, Woovv, eia)
     print()
     print("singlet Q=0", e[:nroot])

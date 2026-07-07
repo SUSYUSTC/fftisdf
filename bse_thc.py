@@ -213,7 +213,8 @@ parser.add_argument("-cuda", type=int, default=None)
 parser.add_argument("-nroots", type=int, default=1)
 parser.add_argument("-pattern-ov", default=None)
 parser.add_argument("-pattern-full", default=None)
-parser.add_argument("--use-dft-energy", action="store_true")
+parser.add_argument("--use-Edft", action="store_true")
+parser.add_argument("--unscreen", action="store_true")
 parser.add_argument("--indirect", action="store_true")
 args = parser.parse_args()
 
@@ -226,7 +227,8 @@ basis = args.basis
 c_isdf = args.c_isdf
 pattern_ov = args.pattern_ov
 pattern_full = args.pattern_full
-use_dft_energy = args.use_dft_energy
+use_Edft = args.use_Edft
+unscreen = args.unscreen
 TDA = True
 klabel = system_common.get_klabel(kmesh)
 data_dir = system_common.get_data_dir(system, basis)
@@ -259,9 +261,9 @@ nocc = mf.cell.nelectron // 2
 C = np.asarray(mf.mo_coeff)
 utils.enable_fast_fft()
 mo_energy_dft = np.asarray(mf.mo_energy)
-mo_energy_qp = mo_energy_dft if use_dft_energy else mo_energy
+mo_energy_qp = mo_energy_dft if use_Edft else mo_energy
 nkpts = len(kpts)
-eia_gw_q0 = mo_energy[:, None, nocc:] - mo_energy[:, :nocc, None]
+eia_gw_q0 = mo_energy_qp[:, None, nocc:] - mo_energy_qp[:, :nocc, None]
 eia_gw_q0 = np.sort(eia_gw_q0.reshape(-1))
 eia_dft = mo_energy_dft[:, None, nocc:] - mo_energy_dft[:, :nocc, None]
 eia_dft = np.sort(eia_dft.reshape(-1))
@@ -274,7 +276,8 @@ print("cuda", args.cuda)
 print("nroot", nroot)
 print("pattern_ov", pattern_ov)
 print("pattern_full", pattern_full)
-print("use_dft_energy", use_dft_energy)
+print("use_Edft", use_Edft)
+print("unscreen", unscreen)
 print("indirect", args.indirect)
 print("TDA", TDA)
 print("nocc", nocc, "nmo", mo_energy.shape[-1], "nkpts", nkpts)
@@ -288,12 +291,15 @@ if ov_chk is None:
     X_bare, W_bare = load_thc(bare_chk, C)
 else:
     X_bare, W_bare = load_thc(ov_chk, C)
-X_screen, W_screen = load_thc(screen_chk, C)
+if unscreen:
+    X_screen, W_screen = X_bare, W_bare
+else:
+    X_screen, W_screen = load_thc(screen_chk, C)
 W_screen_fft_neg = get_W_fft_neg(W_screen)
 kq = build_kq_map(kmesh)
 
 print("bare THC", bare_chk if ov_chk is None else ov_chk)
-print("screen THC", screen_chk)
+print("screen THC", "bare" if unscreen else screen_chk)
 
 if args.indirect:
     q_indirect, e0_all = get_indirect_q(nocc, mo_energy_qp, kq)
@@ -302,17 +308,17 @@ if args.indirect:
     eia = get_eia_q(nocc, mo_energy_qp, kq_q)
     eia_gw = np.sort(eia.detach().cpu().numpy().reshape(-1))
     print("indirect q", q_indirect, "q_int", q_int)
-    print("lowest GW excitation by q", e0_all)
+    print("lowest QP excitation by q", e0_all)
     print()
     print("q", q_indirect, "q_int", q_int)
-    print("GW excitation", eia_gw[:nroot])
+    print("QP excitation", eia_gw[:nroot])
     e, vec = solve_tda_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q_indirect, eia)
     print()
     print("singlet", e[:nroot])
     print("binding", eia_gw[0] - e[0])
 else:
     eia = get_eia(nocc, mo_energy_qp)
-    print("GW excitation Q=0", eia_gw_q0[:nroot])
+    print("QP excitation Q=0", eia_gw_q0[:nroot])
     e, vec = solve_tda_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia)
     print()
     print("singlet Q=0", e[:nroot])
