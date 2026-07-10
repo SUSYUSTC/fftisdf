@@ -5,6 +5,7 @@ import numpy as np
 from fcdmft.gw.pbc.krgw_ac import KRGWAC
 from fcdmft.gw.pbc import kbse
 import threadpoolctl
+import pyscf
 import system_common
 threadpoolctl.threadpool_limits(1)
 
@@ -30,6 +31,7 @@ gw_cache_dir = os.path.join(data_dir, f"GWcache_{klabel}")
 with open(dft_pkl, "rb") as f:
     mf = pickle.load(f)
     mf.with_df._cderi = gdf_chk
+    mf.max_memory = pyscf.lib.parameters.MAX_MEMORY
 
 gw_path = os.path.join(data_dir, f"GWenergy_{klabel}.npy")
 screening_path = os.path.join(data_dir, f"screening_eps_{klabel}.npy")
