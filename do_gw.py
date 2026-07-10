@@ -37,7 +37,7 @@ gw_path = os.path.join(data_dir, f"GWenergy_{klabel}.npy")
 screening_path = os.path.join(data_dir, f"screening_eps_{klabel}.npy")
 head_path = os.path.join(data_dir, f"bse_head_{klabel}.npy")
 
-fc = True
+fc = system_common.load_section_setting(system, basis, "gw", "fc", suffix=suffix, default=True)
 gw = KRGWAC(mf)
 gw.fc = fc
 gw.verbose = 5

@@ -100,6 +100,11 @@ def load_cell_setting(system, basis, name, suffix=None):
     return settings.get("cell", {}).get(name)
 
 
+def load_section_setting(system, basis, section, name, suffix=None, default=None):
+    settings = load_settings(system, basis, suffix=suffix)
+    return settings.get(section, {}).get(name, default)
+
+
 def _get_basis_variants(path):
     if path in _basis_variant_cache:
         return _basis_variant_cache[path]
