@@ -18,8 +18,8 @@ import utils
 
 
 def screen_gdf_tensor(R, eps):
-    eps_inv_sqrt = utils.matrix_power(eps, -0.5)
-    R = np.einsum("kqxab,qxy->kqyab", R, eps_inv_sqrt, optimize=True)
+    eps_inv_half = utils.matrix_power(eps, 0.5)
+    R = np.einsum("qyx,kqxab->kqyab", eps_inv_half, R, optimize=True)
     return R
 
 

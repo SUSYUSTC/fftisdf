@@ -32,15 +32,15 @@ def build_R(mf, kpts_int, kmesh):
     return torch.from_numpy(R).to(device=device, dtype=complex_dtype)
 
 
-def build_R_screen(R, eps, kpts_int, kmesh):
+def build_R_screen(R, eps_inv, kpts_int, kmesh):
     nkpts = int(np.prod(kmesh))
-    eps_inv_sqrt = utils.matrix_power(eps, -0.5)
+    eps_inv_half = utils.matrix_power(eps_inv, 0.5)
     k1_all = np.arange(nkpts)[:, None]
     k2_all = np.arange(nkpts)[None, :]
-    q_int = (kpts_int[k2_all] - kpts_int[k1_all]) % kmesh
+    q_int = (kpts_int[k1_all] - kpts_int[k2_all]) % kmesh
     q = np.ravel_multi_index(q_int.reshape(-1, 3).T, kmesh).reshape(nkpts, nkpts)
-    eps_inv_sqrt_12 = torch.from_numpy(eps_inv_sqrt[q]).to(device=device, dtype=complex_dtype)
-    R_screen = torch.einsum("klxab,klxy->klyab", R, eps_inv_sqrt_12)
+    eps_inv_half_12 = torch.from_numpy(eps_inv_half[q]).to(device=device, dtype=complex_dtype)
+    R_screen = torch.einsum("klyx,klxab->klyab", eps_inv_half_12, R)
     return R_screen
 
 
@@ -109,14 +109,15 @@ def apply_ovov(H, x):
     return torch.einsum("kliajb,ljb->kia", H, x)
 
 
-def apply_A(Vovov, Woovv, eia, x):
+def apply_A(Vovov, Woovv, eia, gamma, x):
     y = eia * x
     y += apply_oovv(Woovv, x)
+    y -= gamma * x
     y += 0.5 * apply_ovov(Vovov, x)
     return y
 
 
-def make_tda_operator(Vovov, Woovv, eia):
+def make_tda_operator(Vovov, Woovv, eia, gamma):
     nkpts, _, nocc, nvir = Vovov.shape[:4]
     dim = nkpts * nocc * nvir
     it = 0
@@ -126,14 +127,14 @@ def make_tda_operator(Vovov, Woovv, eia):
         print('it', it, end='\r')
         it += 1
         x = torch.from_numpy(x.reshape(nkpts, nocc, nvir)).to(device=device, dtype=complex_dtype)
-        y = apply_A(Vovov, Woovv, eia, x)
+        y = apply_A(Vovov, Woovv, eia, gamma, x)
         return y.reshape(-1).detach().cpu().numpy()
 
     return scipy.sparse.linalg.LinearOperator((dim, dim), matvec=matvec, dtype=scipy_dtype)
 
 
-def solve_tda(Vovov, Woovv, eia):
-    op = make_tda_operator(Vovov, Woovv, eia)
+def solve_tda(Vovov, Woovv, eia, gamma):
+    op = make_tda_operator(Vovov, Woovv, eia, gamma)
     e, x = scipy.sparse.linalg.eigsh(op, k=nroot, which="SA", tol=eig_tol)
     idx = np.argsort(e.real)
     return e[idx].real, x[:, idx].T
@@ -185,6 +186,7 @@ dft_pkl = os.path.join(data_dir, f"DFT_{klabel}.pkl")
 gdf_chk = os.path.join(data_dir, f"GDF_{klabel}.chk")
 gw_path = os.path.join(data_dir, f"GWenergy_{klabel}.npy")
 eps_path = os.path.join(data_dir, f"screening_eps_{klabel}.npy")
+head_path = os.path.join(data_dir, f"bse_head_{klabel}.npy")
 
 with open(dft_pkl, "rb") as f:
     mf = pickle.load(f)
@@ -194,13 +196,14 @@ if isinstance(mf.with_df, df.GDF):
 kpts = np.asarray(mf.kpts)
 kpts_int = get_kpts_int(mf.cell, kpts, kmesh)
 mo_energy = np.load(gw_path)
-eps = np.load(eps_path)
+eps_inv = np.load(eps_path)
+gamma = 0.0 if unscreen else float(np.load(head_path))
 mo_energy_qp = np.asarray(mf.mo_energy) if use_Edft else mo_energy
 nocc = mf.cell.nelectron // 2
 nkpts = len(kpts)
 
 R = build_R(mf, kpts_int, kmesh)
-R_screen = R if unscreen else build_R_screen(R, eps, kpts_int, kmesh)
+R_screen = R if unscreen else build_R_screen(R, eps_inv, kpts_int, kmesh)
 kq = build_kq_map(kmesh).to(device=device)
 
 print("kmesh", kmesh)
@@ -211,6 +214,7 @@ print("use_Edft", use_Edft)
 print("unscreen", unscreen)
 print("indirect", args.indirect)
 print("TDA", TDA)
+print("gamma_head", gamma)
 print("nocc", nocc, "nmo", mo_energy_qp.shape[-1], "nkpts", nkpts)
 print("SCF energy", mf.e_tot)
 
@@ -227,7 +231,7 @@ if args.indirect:
     print()
     print("q", q_indirect, "q_int", q_int)
     print("QP excitation", eia_gw[:nroot])
-    e, vec = solve_tda(Vovov, Woovv, eia)
+    e, vec = solve_tda(Vovov, Woovv, eia, gamma)
     print()
     print("singlet", e[:nroot])
     print("binding", eia_gw[0] - e[0])
@@ -238,6 +242,6 @@ else:
     eia_gw = mo_energy_qp[:, None, nocc:] - mo_energy_qp[:, :nocc, None]
     eia_gw = np.sort(eia_gw.reshape(-1))
     print("QP excitation Q=0", eia_gw[:nroot])
-    e, vec = solve_tda(Vovov, Woovv, eia)
+    e, vec = solve_tda(Vovov, Woovv, eia, gamma)
     print()
     print("singlet Q=0", e[:nroot])

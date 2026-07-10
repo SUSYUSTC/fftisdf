@@ -75,6 +75,9 @@ def ravel_multi_index(indices, shape):
 
 def matrix_operation(A, func):
     eigvals, eigvecs = np.linalg.eigh(A)
+    scale = np.max(np.abs(eigvals), axis=-1, keepdims=True)
+    tol = np.maximum(scale, 1.0) * 1e-12
+    eigvals = np.where((eigvals < 0) & (eigvals > -tol), 0.0, eigvals)
     eigvals = func(eigvals)
     return np.einsum("...ai,...i,...bi->...ab", eigvecs, eigvals, eigvecs.conj(), optimize=True)
 
