@@ -3,7 +3,6 @@ import pickle
 import argparse
 import numpy as np
 from fcdmft.gw.pbc.krgw_ac import KRGWAC
-from fcdmft.gw.pbc import kbse
 import threadpoolctl
 import pyscf
 import system_common
@@ -33,9 +32,8 @@ with open(dft_pkl, "rb") as f:
     mf.with_df._cderi = gdf_chk
     mf.max_memory = pyscf.lib.parameters.MAX_MEMORY
 
-gw_path = os.path.join(data_dir, f"GWenergy_{klabel}.npy")
-screening_path = os.path.join(data_dir, f"screening_eps_{klabel}.npy")
-head_path = os.path.join(data_dir, f"bse_head_{klabel}.npy")
+gw_energy_path = os.path.join(data_dir, f"GWenergy_{klabel}.npy")
+gw_pkl_path = os.path.join(data_dir, f"GW_{klabel}.pkl")
 
 fc = system_common.load_section_setting(system, basis, "gw", "fc", suffix=suffix, default=True)
 gw = KRGWAC(mf)
@@ -51,20 +49,5 @@ os.chdir(cwd)
 from mpi4py import MPI
 rank = MPI.COMM_WORLD.Get_rank()
 if rank == 0:
-    np.save(gw_path, gw.mo_energy)
-    transfer = kbse._make_transfer_map(mf.cell, mf.kpts)
-    eps_inv = kbse._build_screened_coulomb(
-        gw,
-        gw.mo_energy,
-        gw.mo_coeff,
-        transfer,
-        gamma_coulomb_cutoff=1.0e-5,
-    )
-    kpts_int = np.round(mf.cell.get_scaled_kpts(mf.kpts) * np.asarray(kmesh)).astype(int) % np.asarray(kmesh)
-    kpt_map = {tuple(k): i for i, k in enumerate(kpts_int)}
-    negative = np.array([kpt_map[tuple((-k) % np.asarray(kmesh))] for k in kpts_int], dtype=np.int64)
-    eps_inv = np.asarray(eps_inv)[negative]
-    bse = kbse.KBSE(gw)
-    gamma = kbse._gamma_head_strength(bse)
-    np.save(screening_path, np.asarray(eps_inv))
-    np.save(head_path, np.asarray(gamma))
+    np.save(gw_energy_path, gw.mo_energy)
+    pickle.dump(gw, open(gw_pkl_path, "wb"))

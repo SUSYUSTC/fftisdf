@@ -57,7 +57,7 @@ do_MP2 = args.MP2
 data_dir = system_common.get_data_dir(system, basis)
 dft_pkl = os.path.join(data_dir, f"DFT_{klabel}.pkl")
 gdf_chk = os.path.join(data_dir, f"GDF_{klabel}.chk")
-screening_path = os.path.join(data_dir, f"screening_eps_{klabel}.npy")
+screening_path = os.path.join(data_dir, f"screening_eps_ext_{klabel}.npy")
 
 block_tag = 'ov' if use_ov else 'full'
 screen_tag = "screen" if screen else "bare"
