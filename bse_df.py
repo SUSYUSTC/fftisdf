@@ -27,9 +27,10 @@ def get_kpts_int(cell, kpts, kmesh):
 
 
 def build_R(mf, kpts_int, kmesh):
-    C = np.asarray(mf.mo_coeff)
-    R = utils.get_gdf_tensor_compact(mf.with_df, kpts_int, kmesh, C, C, layout="k1k2")
-    return torch.from_numpy(R).to(device=device, dtype=complex_dtype)
+    C = torch.from_numpy(np.asarray(mf.mo_coeff)).to(device=device, dtype=complex_dtype)
+    R_ao = torch.from_numpy(utils.get_gdf_tensor_compact(mf.with_df, kpts_int, kmesh, layout="k1k2")).to(device=device, dtype=complex_dtype)
+    R = torch.einsum('pqxij,pia,qjb->pqxab', R_ao, C.conj(), C)
+    return R
 
 
 def build_R_screen(R, eps_inv_ext, kpts_int, kmesh):
@@ -160,7 +161,7 @@ def get_indirect_q(nocc, mo_energy, kq):
 
 
 nroot = 1
-eig_tol = 1e-4
+eig_tol = 1e-5
 
 parser = argparse.ArgumentParser()
 parser.add_argument("system")
