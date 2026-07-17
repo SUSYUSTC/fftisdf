@@ -44,6 +44,7 @@ gw.cell = mf.cell
 gw.kpts = mf.kpts
 
 bse = kbse.KBSE(gw)
+bse.verbose = 10
 bse.qkpt = 0
 bse.TDA = True
 bse.coulomb_correction = True

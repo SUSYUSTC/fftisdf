@@ -1,6 +1,7 @@
 import argparse
 import os
 import pickle
+import time
 import numpy as np
 import scipy.sparse.linalg
 import torch
@@ -207,8 +208,13 @@ mo_energy_qp = np.asarray(mf.mo_energy) if use_Edft else mo_energy
 nocc = mf.cell.nelectron // 2
 nkpts = len(kpts)
 
+t1 = time.time()
 R = build_R(mf, kpts_int, kmesh)
+t2 = time.time()
+print('build R time', t2 - t1)
 R_screen = R if unscreen else build_R_screen(R, eps_inv_ext, kpts_int, kmesh)
+t3 = time.time()
+print('build R_screen time', t3 - t2)
 kq = build_kq_map(kmesh).to(device=device)
 
 print("kmesh", kmesh)
