@@ -3,9 +3,11 @@ import os
 import pickle
 import time
 import numpy as np
+import scipy.linalg
 import scipy.sparse.linalg
 import torch
 from pyscf.pbc import df
+from pyscf.pbc.df import rsdf_builder
 
 import system_common
 import utils
@@ -34,16 +36,48 @@ def build_R(mf, kpts_int, kmesh):
     return R
 
 
-def build_R_screen(R, eps_inv_ext, kpts_int, kmesh):
+def get_q0_charge_vector(mf):
+    auxcell = df.make_auxcell(mf.cell, mf.with_df.auxbasis)
+    builder = rsdf_builder._RSGDFBuilder(mf.cell, auxcell, mf.kpts).build()
+    builder.mesh = mf.with_df.mesh
+    builder.linear_dep_threshold = mf.with_df.linear_dep_threshold
+    j2c = builder.get_2c2e(np.zeros((1, 3)))[0]
+    chol = scipy.linalg.cholesky(j2c, lower=True)
+    charge = rsdf_builder._gaussian_int(auxcell)
+    charge = charge / np.linalg.norm(charge)
+    u = chol.T.conj() @ charge
+    u = u / np.linalg.norm(u)
+    return torch.from_numpy(u).to(device=device, dtype=complex_dtype)
+
+
+def project_q0_charge_from_R(R, u):
+    R_proj = R.clone()
+    nkpts = R.shape[0]
+    idx = torch.arange(nkpts, device=device)
+    R0 = R_proj[idx, idx]
+    coeff = torch.einsum("x,kxab->kab", u.conj(), R0)
+    R_proj[idx, idx] -= torch.einsum("x,kab->kxab", u, coeff)
+    before = torch.linalg.norm(R0).item()
+    after = torch.linalg.norm(R_proj[idx, idx]).item()
+    print("project q=0 charge from W R", before, after)
+    return R_proj
+
+
+def build_R_screen(R, eps_inv_ext, kpts_int, kmesh, nofc=False):
     nkpts = int(np.prod(kmesh))
     nao = R.shape[-1]
-    R_ext = torch.zeros((nkpts, nkpts, R.shape[2] + 1, nao, nao), dtype=complex_dtype, device=device)
-    R_ext[:, :, 1:] = R
-    eye = torch.eye(nao, dtype=complex_dtype, device=device)
-    idx = torch.arange(nkpts, device=device)
-    R_ext[idx, idx, 0] = eye
+    if nofc:
+        eps_inv = eps_inv_ext[:, 1:, 1:]
+        R_ext = R
+    else:
+        eps_inv = eps_inv_ext
+        R_ext = torch.zeros((nkpts, nkpts, R.shape[2] + 1, nao, nao), dtype=complex_dtype, device=device)
+        R_ext[:, :, 1:] = R
+        eye = torch.eye(nao, dtype=complex_dtype, device=device)
+        idx = torch.arange(nkpts, device=device)
+        R_ext[idx, idx, 0] = eye
 
-    eps_inv_half = utils.matrix_power(eps_inv_ext, 0.5)
+    eps_inv_half = utils.matrix_power(eps_inv, 0.5)
     k1_all = np.arange(nkpts)[:, None]
     k2_all = np.arange(nkpts)[None, :]
     q_int = (kpts_int[k1_all] - kpts_int[k2_all]) % kmesh
@@ -178,6 +212,7 @@ parser.add_argument("-nroots", type=int, default=1)
 parser.add_argument("-suffix", default=None)
 parser.add_argument("--use-Edft", action="store_true")
 parser.add_argument("--unscreen", action="store_true")
+parser.add_argument("--nofc", action="store_true")
 parser.add_argument("--indirect", action="store_true")
 args = parser.parse_args()
 
@@ -190,6 +225,7 @@ basis = args.basis
 suffix = args.suffix
 use_Edft = args.use_Edft
 unscreen = args.unscreen
+nofc = args.nofc
 TDA = True
 klabel = system_common.get_klabel(kmesh)
 data_dir = system_common.get_data_dir(system, basis, suffix=suffix)
@@ -211,12 +247,17 @@ mo_energy_qp = np.asarray(mf.mo_energy) if use_Edft else mo_energy
 nocc = mf.cell.nelectron // 2
 nvir = mf.cell.nao - nocc
 nkpts = len(kpts)
+project_q0_charge = system_common.load_section_setting(system, basis, "bse", "project_q0_charge", suffix=suffix, default=False)
 
 t1 = time.time()
 R = build_R(mf, kpts_int, kmesh)
 t2 = time.time()
 print('build R time', t2 - t1)
-R_screen = R if unscreen else build_R_screen(R, eps_inv_ext, kpts_int, kmesh)
+R_for_W = R
+if project_q0_charge and not nofc:
+    u_charge = get_q0_charge_vector(mf)
+    R_for_W = project_q0_charge_from_R(R, u_charge)
+R_screen = R_for_W if unscreen else build_R_screen(R_for_W, eps_inv_ext, kpts_int, kmesh, nofc=nofc)
 t3 = time.time()
 print('build R_screen time', t3 - t2)
 kq = build_kq_map(kmesh).to(device=device)
@@ -227,6 +268,8 @@ print("cuda", args.cuda)
 print("nroot", nroot)
 print("use_Edft", use_Edft)
 print("unscreen", unscreen)
+print("nofc", nofc)
+print("project_q0_charge", project_q0_charge)
 print("indirect", args.indirect)
 print("TDA", TDA)
 print("nocc", nocc, "nmo", mo_energy_qp.shape[-1], "nkpts", nkpts)

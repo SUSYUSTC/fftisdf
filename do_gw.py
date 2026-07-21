@@ -36,11 +36,15 @@ gw_energy_path = os.path.join(data_dir, f"GWenergy_{klabel}.npy")
 gw_pkl_path = os.path.join(data_dir, f"GW_{klabel}.pkl")
 
 fc = system_common.load_section_setting(system, basis, "gw", "fc", suffix=suffix, default=True)
+use_pyscf_vk = system_common.load_section_setting(system, basis, "gw", "use_pyscf_vk", suffix=suffix, default=False)
+
+
 gw = KRGWAC(mf)
 gw.fc = fc
 gw.verbose = 5
 gw.writefile = 1
 gw.load_vxc = True
+gw.use_pyscf_vk = use_pyscf_vk
 os.makedirs(gw_cache_dir, exist_ok=True)
 cwd = os.getcwd()
 os.chdir(gw_cache_dir)

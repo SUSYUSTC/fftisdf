@@ -194,7 +194,6 @@ def make_cell(system, basis, verbose=0, suffix=None):
     cell.pseudo = pseudo
     if is_2d:
         cell.dimension = 2
-        cell.low_dim_ft_type = "inf_vacuum"
     for key, value in cell_settings.items():
         if key == "ke_cutoff":
             continue
