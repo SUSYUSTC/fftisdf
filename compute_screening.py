@@ -8,6 +8,17 @@ from pyscf.pbc import df
 import system_common
 
 
+def get_q0_directions(cell):
+    if cell.dimension == 2:
+        return np.array([
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+        ])
+    return np.vstack([np.eye(3), -np.eye(3)])
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("system")
 parser.add_argument("kx", type=int)
@@ -37,6 +48,8 @@ if isinstance(mf.with_df, df.GDF):
 with open(gw_pkl_path, "rb") as f:
     gw = pickle.load(f)
 
+fc = system_common.load_section_setting(system, basis, "bse", "fc", suffix=suffix, default=True)
+
 gw._scf = mf
 gw.kmf = mf
 gw.with_df = mf.with_df
@@ -47,10 +60,10 @@ bse = kbse.KBSE(gw)
 bse.verbose = 10
 bse.qkpt = 0
 bse.TDA = True
-bse.coulomb_correction = True
-bse.dielectric_correction = True
-bse.dielectric_wing = True
-bse.q0_directions = np.vstack([np.eye(3), -np.eye(3)])
+bse.coulomb_correction = fc
+bse.dielectric_correction = fc
+bse.dielectric_wing = fc
+bse.q0_directions = get_q0_directions(mf.cell)
 bse.q0_step = 1e-3
 bse.build_finite_size()
 
@@ -58,10 +71,13 @@ naux = bse.eps_inv[0].shape[0]
 nkpts = len(mf.kpts)
 eps_inv_ext = np.zeros((nkpts, naux + 1, naux + 1), dtype=np.complex128)
 eps_inv_ext[:, 1:, 1:] = np.asarray(bse.eps_inv)
-eps_inv_ext[0, 1:, 1:] = np.asarray(bse.eps_inv_body_q0)
-eps_inv_ext[0, 0, 0] = nkpts * bse.coulomb_head * bse.eps_inv_head
-eps_inv_ext[0, 1:, 0] = nkpts * bse.coulomb_wing * bse.eps_inv_wing
-eps_inv_ext[0, 0, 1:] = nkpts * bse.coulomb_wing * bse.eps_inv_wing.conj()
+if bse.eps_inv_body_q0 is not None:
+    eps_inv_ext[0, 1:, 1:] = np.asarray(bse.eps_inv_body_q0)
+if bse.coulomb_correction:
+    eps_inv_ext[0, 0, 0] = nkpts * bse.coulomb_head * bse.eps_inv_head
+if bse.dielectric_wing and bse.eps_inv_wing is not None:
+    eps_inv_ext[0, 1:, 0] = nkpts * bse.coulomb_wing * bse.eps_inv_wing
+    eps_inv_ext[0, 0, 1:] = nkpts * bse.coulomb_wing * bse.eps_inv_wing.conj()
 np.save(screening_path, eps_inv_ext)
 
 print("Saved screening eps =", screening_path)

@@ -12,6 +12,8 @@ system = sys.argv[1]
 kmesh = (int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]))
 basis = sys.argv[5]
 cell = system_common.make_cell(system, basis, verbose=0)
+exxdiv = system_common.load_setting(system, basis, "exxdiv")
+conv_tol = system_common.load_setting(system, basis, "conv_tol")
 
 klabel = system_common.get_klabel(kmesh)
 kpts = cell.make_kpts(kmesh)
@@ -22,11 +24,7 @@ print('min S eigval', np.linalg.eigvalsh(S).min())
 
 data_dir = system_common.get_data_dir(system, basis)
 scf_pkl = os.path.join(data_dir, f"SCF_{klabel}.pkl")
-gdf_chk = system_common.resolve_path(
-    system, basis,
-    f"GDF_{klabel}.chk",
-    f"GDF_{system}_{klabel}_{basis}.chk",
-)
+gdf_chk = os.path.join(data_dir, f"GDF_{klabel}.chk")
 
 
 def make_gdf():
@@ -44,12 +42,14 @@ def make_gdf():
     return with_df
 
 
-mf = scf.KHF(cell, kpts, exxdiv='ewald')
-mf.conv_tol = 1e-6
+mf = scf.KHF(cell, kpts, exxdiv=exxdiv).density_fit(with_df=make_gdf())
+if conv_tol is not None:
+    mf.conv_tol = conv_tol
 mf.max_cycle = 50
 mf.verbose = 4
+print("exxdiv =", exxdiv, flush=True)
+print("conv_tol =", mf.conv_tol, flush=True)
 print("GDF chkfile =", gdf_chk, flush=True)
-mf.with_df = make_gdf()
 print("Running SCF ...", flush=True)
 mf.kernel()
 

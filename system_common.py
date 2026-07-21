@@ -183,6 +183,8 @@ def make_cell(system, basis, verbose=0, suffix=None):
     settings = load_settings(system, basis, suffix=suffix)
     pseudo = settings["pseudo_potential"]
     basis_input = load_basis(atom, basis, pseudo)
+    cell_settings = dict(settings.get("cell", {}))
+    is_2d = cell_settings.pop("is_2d", False)
 
     cell = gto.Cell()
     cell.unit = "A"
@@ -190,7 +192,12 @@ def make_cell(system, basis, verbose=0, suffix=None):
     cell.a = lattice
     cell.basis = basis_input
     cell.pseudo = pseudo
-    for key, value in settings.get("cell", {}).items():
+    if is_2d:
+        cell.dimension = 2
+        cell.low_dim_ft_type = "inf_vacuum"
+    for key, value in cell_settings.items():
+        if key == "ke_cutoff":
+            continue
         setattr(cell, key, value)
     cell.verbose = verbose
     cell.build()

@@ -110,6 +110,7 @@ print(cell.mesh)
 print('overlap min eigval', np.linalg.eigvalsh(cell.pbc_intor("int1e_ovlp")).min())
 xc = system_common.load_xc(system, basis, suffix=suffix)
 exxdiv = system_common.load_setting(system, basis, "exxdiv", suffix=suffix)
+conv_tol = system_common.load_setting(system, basis, "conv_tol", suffix=suffix)
 
 kpts = cell.make_kpts(kmesh)
 kpts_int = np.round(cell.get_scaled_kpts(kpts) * kmesh).astype(int) % kmesh
@@ -137,12 +138,14 @@ def make_gdf():
     return with_df
 
 
-mf = scf.KRKS(cell, kpts, exxdiv=exxdiv, xc=xc)
+mf = scf.KRKS(cell, kpts, exxdiv=exxdiv, xc=xc).density_fit(with_df=make_gdf())
 mf.verbose = 4
+if conv_tol is not None:
+    mf.conv_tol = conv_tol
 print("XC =", xc, flush=True)
 print("exxdiv =", exxdiv, flush=True)
+print("conv_tol =", mf.conv_tol, flush=True)
 print("GDF chkfile =", gdf_chk, flush=True)
-mf.with_df = make_gdf()
 print("Running SCF ...", flush=True)
 mf.kernel()
 print('min mo energy', np.asarray(mf.mo_energy).min())
