@@ -13,8 +13,26 @@ import torch
 from pyscf.pbc import df, mp
 
 import fft
+import fft.isdf
 import system_common
 import utils
+import signal
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
+def get_cholesky_mesh(mesh, max_size):
+    mesh = np.asarray(mesh, dtype=int)
+    size = int(np.prod(mesh))
+    if size <= max_size:
+        return mesh.copy()
+
+    c = (max_size / size) ** (1.0 / 3.0)
+    mesh1 = np.maximum(np.floor(mesh * c).astype(int), 1)
+
+    while int(np.prod(mesh1)) > max_size:
+        i = np.argmax(mesh1 / mesh)
+        mesh1[i] -= 1
+    return mesh1
 
 
 def screen_gdf_tensor(R, eps):
@@ -37,6 +55,7 @@ parser.add_argument("kz", type=int)
 parser.add_argument("basis")
 parser.add_argument("c_isdf", type=int)
 parser.add_argument("factor", type=float)
+parser.add_argument("-suffix", default=None)
 parser.add_argument("--save", action='store_true')
 parser.add_argument("--MP2", action='store_true')
 parser.add_argument("--screen", action='store_true')
@@ -49,12 +68,13 @@ klabel = system_common.get_klabel(kmesh)
 basis = args.basis
 c_isdf = args.c_isdf
 factor = args.factor
-reg0 = 1e-10
+suffix = args.suffix
+reg0 = 1e-9
 use_ov = args.ov
 fit_AO = True
 screen = args.screen
 do_MP2 = args.MP2
-data_dir = system_common.get_data_dir(system, basis)
+data_dir = system_common.get_data_dir(system, basis, suffix=suffix)
 dft_pkl = os.path.join(data_dir, f"DFT_{klabel}.pkl")
 gdf_chk = os.path.join(data_dir, f"GDF_{klabel}.chk")
 screening_path = os.path.join(data_dir, f"screening_eps_ext_{klabel}.npy")
@@ -74,6 +94,7 @@ cell = mf.cell
 kpts = cell.make_kpts(kmesh)
 kpts_int = np.round(cell.get_scaled_kpts(kpts) * kmesh).astype(int) % kmesh
 assert utils.is_k_ordered(kpts_int, kmesh)
+cholesky_mesh = get_cholesky_mesh(cell.mesh, fft.isdf.CHOLESKY_MAX_SIZE)
 
 C = np.asarray(mf.mo_coeff)
 nkpts, nao, nmo = C.shape
@@ -87,6 +108,9 @@ nvir = Cvir.shape[2]
 print("")
 print("cell.ke_cutoff =", cell.ke_cutoff)
 print("cell.mesh      =", cell.mesh)
+print("cholesky mesh  =", cholesky_mesh)
+print("cholesky size  =", int(np.prod(cholesky_mesh)))
+print("cholesky max   =", fft.isdf.CHOLESKY_MAX_SIZE)
 print("kmesh          =", kmesh)
 print("basis          =", basis)
 print("nao            =", nao)
@@ -101,13 +125,15 @@ print("reg0           =", reg0)
 print("save chk       =", chkfile)
 print("")
 
+cell_isdf = cell.copy()
+cell_isdf.mesh = cholesky_mesh
 if use_ov:
-    isdf = fft.ISDF(cell, kpts, ov=(Cocc, Cvir))
+    isdf = fft.ISDF(cell_isdf, kpts, ov=(Cocc, Cvir))
 else:
     if fit_AO:
-        isdf = fft.ISDF(cell, kpts)
+        isdf = fft.ISDF(cell_isdf, kpts)
     else:
-        isdf = fft.ISDF(cell, kpts, ov=(C, C))
+        isdf = fft.ISDF(cell_isdf, kpts, ov=(C, C))
 isdf.verbose = 10
 X_ao = isdf.build_inpv_only(cisdf=c_isdf)
 
