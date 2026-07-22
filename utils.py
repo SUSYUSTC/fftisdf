@@ -687,7 +687,7 @@ def mp2_from_ovov_full(eri_ovov_full, mo_energy, nocc):
     return emp2
 
 
-def compare_two_isdf(isdf_ref, isdf, kmesh, C1=None, C2=None, by_q=False):
+def compare_two_isdf(isdf_ref, isdf, kmesh, C1=None, C2=None, by_q=False, abs=False):
     X_ref = torch.from_numpy(np.asarray(isdf_ref.inpv_kpt)).to(dtype=torch.complex128)
     W_ref = torch.from_numpy(np.asarray(isdf_ref.coul_kpt)).to(dtype=torch.complex128)
     X = torch.from_numpy(np.asarray(isdf.inpv_kpt)).to(dtype=torch.complex128)
@@ -721,7 +721,9 @@ def compare_two_isdf(isdf_ref, isdf, kmesh, C1=None, C2=None, by_q=False):
         kmesh,
         by_q=by_q,
     ).real
-    rel_error = torch.sqrt(error2 / ref_norm2)
-    if by_q:
-        return rel_error.detach().cpu().numpy()
-    return rel_error.item()
+    ref_norm = torch.sqrt(ref_norm2).detach().cpu().numpy()
+    error = torch.sqrt(error2).detach().cpu().numpy()
+    if abs:
+        return error, ref_norm
+    else:
+        return error / ref_norm
