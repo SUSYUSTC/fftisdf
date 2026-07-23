@@ -37,7 +37,8 @@ def get_cholesky_mesh(mesh, max_size):
 
 def screen_gdf_tensor(R, eps):
     eps_inv_half = utils.matrix_power(eps, 0.5)
-    R = np.einsum("qyx,kqxab->kqyab", eps_inv_half, R, optimize=True)
+    eps_inv_half = torch.from_numpy(eps_inv_half).to(dtype=R.dtype, device=R.device)
+    R = torch.einsum("qyx,kqxab->kqyab", eps_inv_half, R)
     return R
 
 
@@ -45,6 +46,13 @@ def save_isdf(chkfile, X, W):
     with h5py.File(chkfile, "w") as f:
         f["inpv_kpt"] = X
         f["coul_kpt"] = W
+
+
+def k1k2_to_k1q(R, kpts_int, kmesh):
+    k1_all, k2_all, q_all = utils._get_gdf_layout_indices(kpts_int, kmesh, "k1q")
+    k1_all = torch.from_numpy(k1_all.copy()).to(device=R.device)
+    k2_all = torch.from_numpy(k2_all.copy()).to(device=R.device)
+    return R[k1_all, k2_all]
 
 
 parser = argparse.ArgumentParser()
@@ -143,23 +151,34 @@ Xo = torch.from_numpy(X_ao @ Cocc).to(dtype=complex_dtype)
 Xv = torch.from_numpy(X_ao @ Cvir).to(dtype=complex_dtype)
 
 print("")
-print("Loading GDF tensor ...", flush=True)
+print("Loading GDF tensor in AO k1k2 layout ...", flush=True)
+R_ao = utils.get_gdf_tensor_compact(mf.with_df, kpts_int, kmesh, progressbar=True, layout="k1k2")
+R_ao = torch.from_numpy(R_ao).to(dtype=complex_dtype)
 if use_ov:
-    R = utils.get_gdf_tensor_compact(mf.with_df, kpts_int, kmesh, Cocc, Cvir, progressbar=True, layout="k1q")
+    print("Transforming GDF tensor AO -> OV ...", flush=True)
+    Cocc_t = torch.from_numpy(Cocc).to(dtype=complex_dtype)
+    Cvir_t = torch.from_numpy(Cvir).to(dtype=complex_dtype)
+    R = torch.einsum("klxcd,kca,ldb->klxab", R_ao, Cocc_t.conj(), Cvir_t)
 else:
     if fit_AO:
-        R = utils.get_gdf_tensor_compact(mf.with_df, kpts_int, kmesh, progressbar=True, layout="k1q")
+        R = R_ao
         X =  torch.from_numpy(X_ao).to(dtype=complex_dtype)
     else:
-        R = utils.get_gdf_tensor_compact(mf.with_df, kpts_int, kmesh, C, C, progressbar=True, layout="k1q")
+        print("Transforming GDF tensor AO -> MO ...", flush=True)
+        C_t = torch.from_numpy(C).to(dtype=complex_dtype)
+        R = torch.einsum("klxcd,kca,ldb->klxab", R_ao, C_t.conj(), C_t)
         X =  torch.from_numpy(X_ao @ C).to(dtype=complex_dtype)
+del R_ao
+
+print("Converting GDF tensor k1k2 -> k1q ...", flush=True)
+R = k1k2_to_k1q(R, kpts_int, kmesh)
 
 if screen:
     print("Applying screening ...", flush=True)
     eps = np.load(screening_path)
     R = screen_gdf_tensor(R, eps)
 
-R_t = torch.from_numpy(R)
+R_t = R
 
 
 def solve_w_error2_with_AB(A, B, df_norm2, reg):
