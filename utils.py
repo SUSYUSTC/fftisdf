@@ -237,9 +237,9 @@ def get_gdf_tensor_compact(gdf, kpts_int, kmesh, C1=None, C2=None, *, layout, pr
             block = lib.unpack_tril(block)
         block = block.reshape(naux, nao, nao)
         if C1 is not None:
-            block = np.einsum("ca,xcd->xad", C1[k1].conj(), block, optimize=True)
+            block = C1[k1].conj().T @ block
         if C2 is not None:
-            block = np.einsum("db,xad->xab", C2[k2], block, optimize=True)
+            block = block @ C2[k2]
         R[i, j] = block
     return R
 
