@@ -64,6 +64,7 @@ parser.add_argument("basis")
 parser.add_argument("c_isdf", type=int)
 parser.add_argument("factor", type=float)
 parser.add_argument("-suffix", default=None)
+parser.add_argument("--abs", action='store_true')
 parser.add_argument("--save", action='store_true')
 parser.add_argument("--MP2", action='store_true')
 parser.add_argument("--screen", action='store_true')
@@ -77,6 +78,7 @@ basis = args.basis
 c_isdf = args.c_isdf
 factor = args.factor
 suffix = args.suffix
+use_abs = args.abs
 reg0 = 1e-9
 use_ov = args.ov
 fit_AO = True
@@ -191,18 +193,25 @@ def solve_w_error2_with_AB(A, B, df_norm2, reg):
 
 def scan_reg(A, B, df_norm2):
     reg = reg0
-    rel_error0 = None
+    if use_abs:
+        rel_error0 = 1
+    else:
+        rel_error0 = None
     for ireg in range(100):
         W, error2 = solve_w_error2_with_AB(A, B, df_norm2, reg)
         rel_error = torch.sqrt(error2 / df_norm2)
-        if ireg == 0:
-            rel_error0 = rel_error
+        if rel_error0 is None:
+            if not np.isnan(rel_error):
+                rel_error0 = rel_error
+            else:
+                reg *= 2.0
+                continue
         print(
             "reg_scan %3d  reg %.16e  rel_error %.16e  ratio %.8e"
             % (ireg, reg, rel_error.detach().cpu().numpy(), (rel_error / rel_error0).detach().cpu().numpy()),
             flush=True,
         )
-        if ireg > 0 and rel_error.item() >= factor * rel_error0.item():
+        if ireg > 0 and rel_error >= factor * rel_error0:
             return reg, W, error2
         reg *= 2.0
     return reg, W, error2
