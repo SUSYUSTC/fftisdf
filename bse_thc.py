@@ -199,9 +199,6 @@ def get_indirect_q(nocc, mo_energy, kq):
     return q, e0
 
 
-nroot = 1
-eig_tol = 1e-4
-
 parser = argparse.ArgumentParser()
 parser.add_argument("system")
 parser.add_argument("kx", type=int)
@@ -210,6 +207,7 @@ parser.add_argument("kz", type=int)
 parser.add_argument("basis")
 parser.add_argument("-cuda", type=int, default=None)
 parser.add_argument("-nroots", type=int, default=1)
+parser.add_argument("-tol", type=float, default=1e-5)
 ov_group = parser.add_mutually_exclusive_group(required=True)
 ov_group.add_argument("-ov_ref", type=int, default=None)
 ov_group.add_argument("-ov_opt", default=None)
@@ -224,6 +222,7 @@ args = parser.parse_args()
 use_gpu = args.cuda is not None
 device = torch.device(f"cuda:{args.cuda}" if use_gpu else "cpu")
 nroot = args.nroots
+eig_tol = args.tol
 system = args.system
 kmesh = (args.kx, args.ky, args.kz)
 basis = args.basis
