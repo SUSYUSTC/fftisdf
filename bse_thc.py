@@ -125,23 +125,21 @@ def apply_screened_E_thc(nocc, X, W_fft_neg, E):
     return y
 
 
-def apply_A_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia, gamma, x):
+def apply_A_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia, x):
     y = eia * x
     y += apply_Woovv_thc(nocc, X_screen, W_screen_fft_neg, x)
-    y -= gamma * x
     y += 0.5 * apply_V_thc(nocc, X_bare, W_bare, x)
     return y
 
 
-def apply_A_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q, eia, gamma, x):
+def apply_A_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q, eia, x):
     y = eia * x
     y += apply_Woovv_thc_q(nocc, X_screen, W_screen_fft_neg, kq_q, x)
-    y -= gamma * x
     y += 0.5 * apply_V_thc_q(nocc, X_bare, W_bare, kq_q, q, x)
     return y
 
 
-def make_tda_operator_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia, gamma):
+def make_tda_operator_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia):
     nkpts, nocc, nvir = eia.shape
     dim = nkpts * nocc * nvir
     it = 0
@@ -152,13 +150,13 @@ def make_tda_operator_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia,
         it += 1
 
         x = torch.from_numpy(x.reshape(nkpts, nocc, nvir)).to(device=device, dtype=complex_dtype)
-        y = apply_A_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia, gamma, x)
+        y = apply_A_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia, x)
         return y.reshape(-1).detach().cpu().numpy()
 
     return scipy.sparse.linalg.LinearOperator((dim, dim), matvec=matvec, dtype=scipy_dtype)
 
 
-def make_tda_operator_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q, eia, gamma):
+def make_tda_operator_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q, eia):
     nkpts, nocc, nvir = eia.shape
     dim = nkpts * nocc * nvir
     it = 0
@@ -168,21 +166,21 @@ def make_tda_operator_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq
         print("it", it, end="\r")
         it += 1
         x = torch.from_numpy(x.reshape(nkpts, nocc, nvir)).to(device=device, dtype=complex_dtype)
-        y = apply_A_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q, eia, gamma, x)
+        y = apply_A_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q, eia, x)
         return y.reshape(-1).detach().cpu().numpy()
 
     return scipy.sparse.linalg.LinearOperator((dim, dim), matvec=matvec, dtype=scipy_dtype)
 
 
-def solve_tda_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia, gamma):
-    op = make_tda_operator_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia, gamma)
+def solve_tda_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia):
+    op = make_tda_operator_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia)
     e, x = scipy.sparse.linalg.eigsh(op, k=nroot, which="SA", tol=eig_tol)
     idx = np.argsort(e.real)
     return e[idx].real, x[:, idx].T
 
 
-def solve_tda_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q, eia, gamma):
-    op = make_tda_operator_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q, eia, gamma)
+def solve_tda_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q, eia):
+    op = make_tda_operator_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q, eia)
     e, x = scipy.sparse.linalg.eigsh(op, k=nroot, which="SA", tol=eig_tol)
     idx = np.argsort(e.real)
     return e[idx].real, x[:, idx].T
@@ -210,11 +208,14 @@ parser.add_argument("kx", type=int)
 parser.add_argument("ky", type=int)
 parser.add_argument("kz", type=int)
 parser.add_argument("basis")
-parser.add_argument("-c_isdf", type=int, default=20)
 parser.add_argument("-cuda", type=int, default=None)
 parser.add_argument("-nroots", type=int, default=1)
-parser.add_argument("-pattern-ov", default=None)
-parser.add_argument("-pattern-full", default=None)
+ov_group = parser.add_mutually_exclusive_group(required=True)
+ov_group.add_argument("-ov_ref", type=int, default=None)
+ov_group.add_argument("-ov_opt", default=None)
+full_group = parser.add_mutually_exclusive_group(required=True)
+full_group.add_argument("-full_ref", type=int, default=None)
+full_group.add_argument("-full_opt", default=None)
 parser.add_argument("--use-Edft", action="store_true")
 parser.add_argument("--unscreen", action="store_true")
 parser.add_argument("--indirect", action="store_true")
@@ -226,9 +227,6 @@ nroot = args.nroots
 system = args.system
 kmesh = (args.kx, args.ky, args.kz)
 basis = args.basis
-c_isdf = args.c_isdf
-pattern_ov = args.pattern_ov
-pattern_full = args.pattern_full
 use_Edft = args.use_Edft
 unscreen = args.unscreen
 TDA = True
@@ -236,21 +234,19 @@ klabel = system_common.get_klabel(kmesh)
 data_dir = system_common.get_data_dir(system, basis)
 dft_pkl = os.path.join(data_dir, f"DFT_{klabel}.pkl")
 gw_path = os.path.join(data_dir, f"GWenergy_{klabel}.npy")
-head_path = os.path.join(data_dir, f"bse_head_{klabel}.npy")
-bare_ref_chk = os.path.join(data_dir, f"ISDFfull_bareGDF_{klabel}_c{c_isdf}.chk")
-screen_ref_chk = os.path.join(data_dir, f"ISDFfull_screenGDF_{klabel}_c{c_isdf}.chk")
 
 
-def get_full_chk(kind, pattern):
-    if pattern is None:
-        return bare_ref_chk if kind == "bare" else screen_ref_chk
-    return os.path.join(data_dir, f"ISDFfull_opt_{kind}GDF_{klabel}_{pattern}.chk")
+def get_full_chk():
+    kind = "bare" if unscreen else "screen"
+    if args.full_ref is not None:
+        return os.path.join(data_dir, f"ISDFfull_{kind}GDF_{klabel}_c{args.full_ref}.chk")
+    return os.path.join(data_dir, f"ISDFfull_opt_{kind}GDF_{klabel}_{args.full_opt}.chk")
 
 
-def get_ov_chk(pattern):
-    if pattern is None:
-        return None
-    return os.path.join(data_dir, f"ISDFov_opt_bareGDF_{klabel}_{pattern}.chk")
+def get_ov_chk():
+    if args.ov_ref is not None:
+        return os.path.join(data_dir, f"ISDFov_bareGDF_{klabel}_c{args.ov_ref}.chk")
+    return os.path.join(data_dir, f"ISDFov_opt_bareGDF_{klabel}_{args.ov_opt}.chk")
 
 
 with open(dft_pkl, "rb") as f:
@@ -265,7 +261,6 @@ C = np.asarray(mf.mo_coeff)
 utils.enable_fast_fft()
 mo_energy_dft = np.asarray(mf.mo_energy)
 mo_energy_qp = mo_energy_dft if use_Edft else mo_energy
-gamma = 0.0 if unscreen else float(np.load(head_path))
 nkpts = len(kpts)
 eia_gw_q0 = mo_energy_qp[:, None, nocc:] - mo_energy_qp[:, :nocc, None]
 eia_gw_q0 = np.sort(eia_gw_q0.reshape(-1))
@@ -275,36 +270,29 @@ eia_dft = np.sort(eia_dft.reshape(-1))
 #print(mo_energy)
 print("kmesh", kmesh)
 print("basis", basis)
-print("c_isdf", c_isdf)
 print("cuda", args.cuda)
 print("nroot", nroot)
-print("pattern_ov", pattern_ov)
-print("pattern_full", pattern_full)
+print("ov_ref", args.ov_ref)
+print("ov_opt", args.ov_opt)
+print("full_ref", args.full_ref)
+print("full_opt", args.full_opt)
 print("use_Edft", use_Edft)
 print("unscreen", unscreen)
 print("indirect", args.indirect)
 print("TDA", TDA)
-print("gamma_head", gamma)
 print("nocc", nocc, "nmo", mo_energy.shape[-1], "nkpts", nkpts)
 print("DFT excitation Q=0", eia_dft[:5])
 print("SCF energy", mf.e_tot)
 
-bare_chk = get_full_chk("bare", pattern_full)
-screen_chk = get_full_chk("screen", pattern_full)
-ov_chk = get_ov_chk(pattern_ov)
-if ov_chk is None:
-    X_bare, W_bare = load_thc(bare_chk, C)
-else:
-    X_bare, W_bare = load_thc(ov_chk, C)
-if unscreen:
-    X_screen, W_screen = X_bare, W_bare
-else:
-    X_screen, W_screen = load_thc(screen_chk, C)
+ov_chk = get_ov_chk()
+full_chk = get_full_chk()
+X_bare, W_bare = load_thc(ov_chk, C)
+X_screen, W_screen = load_thc(full_chk, C)
 W_screen_fft_neg = get_W_fft_neg(W_screen)
 kq = build_kq_map(kmesh)
 
-print("bare THC", bare_chk if ov_chk is None else ov_chk)
-print("screen THC", "bare" if unscreen else screen_chk)
+print("bare OV THC", ov_chk)
+print("screen/full THC", full_chk)
 
 if args.indirect:
     q_indirect, e0_all = get_indirect_q(nocc, mo_energy_qp, kq)
@@ -317,13 +305,13 @@ if args.indirect:
     print()
     print("q", q_indirect, "q_int", q_int)
     print("QP excitation", eia_gw[:nroot])
-    e, vec = solve_tda_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q_indirect, eia, gamma)
+    e, vec = solve_tda_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q_indirect, eia)
     print()
     print("singlet", e[:nroot])
     print("binding", eia_gw[0] - e[0])
 else:
     eia = get_eia(nocc, mo_energy_qp)
     print("QP excitation Q=0", eia_gw_q0[:nroot])
-    e, vec = solve_tda_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia, gamma)
+    e, vec = solve_tda_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia)
     print()
     print("singlet Q=0", e[:nroot])
