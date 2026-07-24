@@ -35,10 +35,11 @@ def get_cholesky_mesh(mesh, max_size):
     return mesh1
 
 
-def screen_gdf_tensor(R, eps):
-    eps_inv_half = utils.matrix_power(eps, 0.5)
-    eps_inv_half = torch.from_numpy(eps_inv_half).to(dtype=R.dtype, device=R.device)
-    R = torch.einsum("qyx,kqxab->kqyab", eps_inv_half, R)
+def screen_gdf_tensor(R, eps_inv_half):
+    #R = torch.einsum("qyx,kqxab->kqyab", eps_inv_half, R)
+    nkpts = R.shape[0]
+    for i in range(nkpts):
+        R[i] = torch.einsum("qyx,qxab->qyab", eps_inv_half, R[i])
     return R
 
 
@@ -178,7 +179,9 @@ R = k1k2_to_k1q(R, kpts_int, kmesh)
 if screen:
     print("Applying screening ...", flush=True)
     eps = np.load(screening_path)[:, 1:, 1:].copy()
-    R = screen_gdf_tensor(R, eps)
+    eps_inv_half = utils.matrix_power(eps, 0.5)
+    eps_inv_half = torch.from_numpy(eps_inv_half).to(dtype=R.dtype, device=R.device)
+    R = screen_gdf_tensor(R, eps_inv_half)
 
 R_t = R
 
