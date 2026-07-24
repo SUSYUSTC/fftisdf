@@ -177,7 +177,7 @@ R = k1k2_to_k1q(R, kpts_int, kmesh)
 
 if screen:
     print("Applying screening ...", flush=True)
-    eps = np.load(screening_path)
+    eps = np.load(screening_path)[:, 1:, 1:].copy()
     R = screen_gdf_tensor(R, eps)
 
 R_t = R
