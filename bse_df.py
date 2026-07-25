@@ -10,6 +10,8 @@ from pyscf.pbc import df
 from pyscf.pbc.df import rsdf_builder
 
 import system_common
+
+Ha2eV = 27.211386245988
 import utils
 
 complex_dtype = torch.complex64
@@ -176,9 +178,9 @@ def make_tda_operator(Vovov, Woovv, eia):
 
 
 def solve_tda(Vovov, Woovv, eia):
-    idx = torch.argmin(eia)
-    v0 = torch.zeros_like(eia.reshape((1, -1)))
-    v0[0, idx] = 1.0
+    idx = int(torch.argmin(eia).item())
+    v0 = np.zeros(eia.numel(), dtype=scipy_dtype)
+    v0[idx] = 1.0
     op = make_tda_operator(Vovov, Woovv, eia)
     e, x = scipy.sparse.linalg.eigsh(op, k=nroot, which="SA", tol=eig_tol, v0=v0)
     idx = np.argsort(e.real)
@@ -291,7 +293,7 @@ if args.indirect:
     e, vec = solve_tda(Vovov, Woovv, eia)
     print()
     print("singlet", e[:nroot])
-    print("binding", eia_gw[0] - e[0])
+    print("binding eV", (eia_gw[0] - e[0]) * Ha2eV)
 else:
     Vovov = build_Vovov(nocc, R)
     Woovv = build_Woovv(nocc, R_screen)
@@ -301,12 +303,14 @@ else:
     idx = np.argsort(eia_gw_flatten)[:nroot]
     print("QP excitation Q=0", eia_gw_flatten[idx])
     idx_k, idx_i, idx_a = np.unravel_index(idx, eia_gw.shape)
-    V_diag = Vovov[idx_k, idx_k, idx_i, idx_a, idx_i, idx_a].numpy()
-    W_diag = Woovv[idx_k, idx_k, idx_i, idx_i, idx_a, idx_a].numpy()
+    V_diag = Vovov[idx_k, idx_k, idx_i, idx_a, idx_i, idx_a].detach().cpu().numpy()
+    W_diag = Woovv[idx_k, idx_k, idx_i, idx_i, idx_a, idx_a].detach().cpu().numpy()
     total_diag = (eia_gw_flatten[idx] + W_diag - 0.5 * V_diag).real
     print("diagonal corrected Q=0", total_diag)
     e_q0 = solve_tda(Vovov[0:1, 0:1], Woovv[0:1, 0:1], eia[0:1])[0]
     print("singlet solved at Q=0 only", e_q0[:nroot])
+    print("binding solved at Q=0 only eV", (eia_gw_flatten[idx[0]] - e_q0[0]) * Ha2eV)
     e, vec = solve_tda(Vovov, Woovv, eia)
     print()
     print("singlet Q=0", e[:nroot])
+    print("binding Q=0 eV", (eia_gw_flatten[idx[0]] - e[0]) * Ha2eV)

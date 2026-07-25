@@ -6,6 +6,8 @@ import numpy as np
 import scipy.sparse.linalg
 import torch
 import system_common
+
+Ha2eV = 27.211386245988
 import utils
 
 complex_dtype = torch.complex64
@@ -309,10 +311,11 @@ if args.indirect:
     e, vec = solve_tda_thc_q(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, kq_q, q_indirect, eia)
     print()
     print("singlet", e[:nroot])
-    print("binding", eia_gw[0] - e[0])
+    print("binding eV", (eia_gw[0] - e[0]) * Ha2eV)
 else:
     eia = get_eia(nocc, mo_energy_qp)
     print("QP excitation Q=0", eia_gw_q0[:nroot])
     e, vec = solve_tda_thc(nocc, X_bare, W_bare, X_screen, W_screen_fft_neg, eia)
     print()
     print("singlet Q=0", e[:nroot])
+    print("binding Q=0 eV", (eia_gw_q0[0] - e[0]) * Ha2eV)
