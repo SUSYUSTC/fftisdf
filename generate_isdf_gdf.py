@@ -35,9 +35,11 @@ def get_cholesky_mesh(mesh, max_size):
     return mesh1
 
 
-def screen_gdf_tensor(R, eps_inv_half):
+def screen_gdf_tensor(R, eps_inv_half, kmesh):
     #R = torch.einsum("qyx,kqxab->kqyab", eps_inv_half, R)
     nkpts = R.shape[0]
+    negative = utils.negative_k(torch.arange(eps_inv_half.shape[0], device=R.device), kmesh)
+    eps_inv_half = eps_inv_half[negative]
     for i in range(nkpts):
         R[i] = torch.einsum("qyx,qxab->qyab", eps_inv_half, R[i])
     return R
@@ -70,6 +72,7 @@ parser.add_argument("--save", action='store_true')
 parser.add_argument("--MP2", action='store_true')
 parser.add_argument("--screen", action='store_true')
 parser.add_argument("--ov", action='store_true')
+parser.add_argument("-cholesky_max", type=int, default=None)
 args = parser.parse_args()
 
 system = args.system
@@ -105,7 +108,9 @@ cell = mf.cell
 kpts = cell.make_kpts(kmesh)
 kpts_int = np.round(cell.get_scaled_kpts(kpts) * kmesh).astype(int) % kmesh
 assert utils.is_k_ordered(kpts_int, kmesh)
-cholesky_mesh = get_cholesky_mesh(cell.mesh, fft.isdf.CHOLESKY_MAX_SIZE)
+cholesky_max = fft.isdf.CHOLESKY_MAX_SIZE if args.cholesky_max is None else args.cholesky_max
+fft.isdf.CHOLESKY_MAX_SIZE = cholesky_max
+cholesky_mesh = get_cholesky_mesh(cell.mesh, cholesky_max)
 
 C = np.asarray(mf.mo_coeff)
 nkpts, nao, nmo = C.shape
@@ -121,7 +126,7 @@ print("cell.ke_cutoff =", cell.ke_cutoff)
 print("cell.mesh      =", cell.mesh)
 print("cholesky mesh  =", cholesky_mesh)
 print("cholesky size  =", int(np.prod(cholesky_mesh)))
-print("cholesky max   =", fft.isdf.CHOLESKY_MAX_SIZE)
+print("cholesky max   =", cholesky_max)
 print("kmesh          =", kmesh)
 print("basis          =", basis)
 print("nao            =", nao)
@@ -181,7 +186,7 @@ if screen:
     eps = np.load(screening_path)[:, 1:, 1:].copy()
     eps_inv_half = utils.matrix_power(eps, 0.5)
     eps_inv_half = torch.from_numpy(eps_inv_half).to(dtype=R.dtype, device=R.device)
-    R = screen_gdf_tensor(R, eps_inv_half)
+    R = screen_gdf_tensor(R, eps_inv_half, kmesh)
 
 R_t = R
 

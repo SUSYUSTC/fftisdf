@@ -40,10 +40,8 @@ def fft_k(A, inverse=False):
 
 
 def get_W_fft_neg(W):
-    nkpts = W.shape[0]
-    negative = utils.negative_k(torch.arange(nkpts, device=W.device), kmesh)
     W_fft = fft_k(W, inverse=False)
-    return W_fft[negative]
+    return W_fft
 
 
 def get_eia(nocc, mo_energy):
