@@ -27,21 +27,6 @@ def get_part(nocc):
     return o, v
 
 
-def get_quadrature(mo_energy, nocc, M, a=0.5):
-    eocc = torch.from_numpy(np.asarray(mo_energy)[:, :nocc].reshape(-1)).to(dtype=real_dtype)
-    evir = torch.from_numpy(np.asarray(mo_energy)[:, nocc:].reshape(-1)).to(dtype=real_dtype)
-    Delta_min = 2 * torch.min(evir) - 2 * torch.max(eocc)
-    nodes, weights = np.polynomial.legendre.leggauss(M)
-    x_nodes = 0.5 * (nodes + 1.0)
-    x_weights = 0.5 * weights
-    beta_weight = []
-    for x, w in zip(x_nodes, x_weights):
-        beta = -np.log(x) / (a * Delta_min.item())
-        weight = w / (a * Delta_min.item() * x)
-        beta_weight.append((beta, weight))
-    return beta_weight
-
-
 def load_thc(chkfile, C):
     with h5py.File(chkfile, "r") as f:
         X_ao = np.asarray(f["inpv_kpt"])
@@ -52,87 +37,69 @@ def load_thc(chkfile, C):
     return X, W
 
 
-def apply_laplace_X(X, mo_energy, nocc, beta, weight):
-    o, v = get_part(nocc)
-    eocc = torch.from_numpy(np.asarray(mo_energy)[:, o]).to(device=device, dtype=real_dtype)
-    evir = torch.from_numpy(np.asarray(mo_energy)[:, v]).to(device=device, dtype=real_dtype)
-    Xo = X[:, :, o] * torch.exp(0.5 * beta * eocc)[:, None, :] * (weight ** 0.125)
-    Xv = X[:, :, v] * torch.exp(-0.5 * beta * evir)[:, None, :] * (weight ** 0.125)
-    return Xo, Xv
 
-
-def build_pair(Xo, Xv, k1, k2):
-    P = torch.einsum("kIi,kIa->kIia", Xo[k1].conj(), Xv[k2])
-    return P.reshape((len(k1), Xo.shape[1], -1))
-
-
-def build_pair_one(Xo, Xv, k1, k2):
-    P = torch.einsum("Ii,Ia->Iia", Xo[k1].conj(), Xv[k2])
-    return P.reshape((Xo.shape[1], -1))
-
-
-def build_R_pair_left(P, W):
-    return torch.einsum("kIp,IJ->kJp", P, W)
-
-
-def build_R_pair_right(P):
-    return P
-
-
-def build_R_pair_one_left(P, W):
-    return P.T @ W
-
-
-def build_R_pair_one_right(P):
-    return P.T
-
-
-def laplace_mp2_from_thc(X, W, mo_energy, nocc, kmesh, M):
+def build_Rov_thc(X, W, nocc, kmesh):
     nkpts = X.shape[0]
     nvir = X.shape[-1] - nocc
+    nth = X.shape[1]
+    o, v = get_part(nocc)
+    Xo = X[:, :, o]
+    Xv = X[:, :, v]
+    k = torch.arange(nkpts, device=device)
+    neg = utils.negative_k(k, kmesh).to(device=device)
+
+    Rleft = torch.empty((nkpts, nkpts, nth, nocc, nvir), dtype=complex_dtype, device=device)
+    Rright = torch.empty((nkpts, nkpts, nth, nocc, nvir), dtype=complex_dtype, device=device)
+    for k1 in range(nkpts):
+        for k2 in range(nkpts):
+            q = utils.add_k(k2, neg[k1], kmesh).item()
+            P = torch.einsum('Ii,Ia->Iia', Xo[k1].conj(), Xv[k2])
+            P = P.reshape((nth, nocc * nvir))
+            Rleft[k1, k2] = (P.T @ W[q]).T.reshape((nth, nocc, nvir))
+            Rright[k1, k2] = P.reshape((nth, nocc, nvir))
+    return Rleft, Rright
+
+
+def canonical_mp2_from_Rlr(Rleft, Rright, mo_energy, nocc, kmesh, verbose=False):
+    nkpts = Rleft.shape[0]
+    nvir = Rleft.shape[-1]
     k = torch.arange(nkpts, device=device)
     neg = utils.negative_k(k, kmesh).to(device=device)
     kq = utils.add_k(k[:, None], k[None, :], kmesh).to(device=device)
+    e = torch.from_numpy(np.asarray(mo_energy)).to(device=device, dtype=real_dtype)
+    eocc = e[:, :nocc]
+    evir = e[:, nocc:nocc+nvir]
 
-    J = torch.tensor(0.0, dtype=complex_dtype, device=device)
-    K = torch.tensor(0.0, dtype=complex_dtype, device=device)
-    for ibeta, (beta, weight) in enumerate(get_quadrature(mo_energy, nocc, M)):
+    emp2 = torch.tensor(0.0, dtype=real_dtype, device=device)
+    for q in range(nkpts):
         t0 = time.time()
-        Xo, Xv = apply_laplace_X(X, mo_energy, nocc, beta, weight)
-        J_beta = torch.tensor(0.0, dtype=complex_dtype, device=device)
-        K_beta = torch.tensor(0.0, dtype=complex_dtype, device=device)
-        for q in range(nkpts):
-            kp = kq[:, q]
-            km = kq[:, neg[q]]
-            Pia = build_pair(Xo, Xv, k, kp)
-            Pjb = build_pair(Xo, Xv, k, km)
-            Ria = build_R_pair_left(Pia, W[q])
-            Rjb = build_R_pair_right(Pjb)
-            G = torch.einsum("kxp,lxq->klpq", Ria, Rjb)
-            J_beta += torch.sum(G * G.conj())
-            for ik in range(nkpts):
-                ka = kp[ik]
-                for il in range(nkpts):
-                    kb = km[il]
-                    q2 = utils.add_k(kb, -ik, kmesh).item()
-                    Pib = build_pair_one(Xo, Xv, ik, kb)
-                    Pja = build_pair_one(Xo, Xv, il, ka)
-                    Rib = build_R_pair_one_left(Pib, W[q2])
-                    Rja = build_R_pair_one_right(Pja)
-                    H = Rib @ Rja.T
-                    K_beta += torch.einsum(
-                        "iajb,ibja->",
-                        G[ik, il].reshape((nocc, nvir, nocc, nvir)),
-                        H.reshape((nocc, nvir, nocc, nvir)).conj(),
-                    )
-        J += J_beta
-        K += K_beta
-        print("beta %2d  beta %.8e  weight %.8e  J %.12e  K %.12e  time %.4f" % (
-            ibeta, beta, weight, J_beta.real.item(), K_beta.real.item(), time.time() - t0,
-        ), flush=True)
-    emp2 = (K - 2.0 * J).real / (nkpts ** 3)
+        kp = kq[:, q]
+        km = kq[:, neg[q]]
+        Ria = Rleft[k, kp]
+        Rjb = Rright[k, km]
+        G = torch.einsum('kxia,lxjb->kliajb', Ria, Rjb) / nkpts
+        denom = (
+            eocc[:, None, :, None, None, None]
+            - evir[kp][:, None, None, :, None, None]
+            + eocc[None, :, None, None, :, None]
+            - evir[km][None, :, None, None, None, :]
+        )
+        T = G.conj() / denom
+        direct = torch.einsum('kliajb,kliajb->', T, G).real
+        exchange = torch.tensor(0.0, dtype=real_dtype, device=device)
+        for ik in range(nkpts):
+            ka = kp[ik]
+            Rib = Rleft[ik, km]
+            Rja = Rright[k, ka]
+            H = torch.einsum('lxib,lxja->lijba', Rib, Rja) / nkpts
+            exchange -= torch.einsum('liajb,lijba->', T[ik], H).real
+        emp2 += 2.0 * direct + exchange
+        if verbose:
+            print('q %3d  direct %.12e  exchange %.12e  time %.4f' % (
+            q, direct.item(), exchange.item(), time.time() - t0,
+            ), flush=True)
+    emp2 /= nkpts
     return emp2
-
 
 parser = argparse.ArgumentParser()
 parser.add_argument("system")
@@ -142,8 +109,8 @@ parser.add_argument("kz", type=int)
 parser.add_argument("basis")
 parser.add_argument("-suffix", default=None)
 parser.add_argument("-cuda", type=int, default=None)
-parser.add_argument("-M", type=int, default=12)
 parser.add_argument("--exact", action="store_true")
+parser.add_argument("--verbose", action="store_true")
 ov_group = parser.add_mutually_exclusive_group(required=True)
 ov_group.add_argument("-ov_ref", type=int, default=None)
 ov_group.add_argument("-ov_opt", default=None)
@@ -166,8 +133,6 @@ else:
 with open(dft_pkl, "rb") as f:
     mf = pickle.load(f)
 
-kpts = np.asarray(mf.kpts)
-kpts_int = get_kpts_int(mf.cell, kpts, kmesh)
 nocc = mf.cell.nelectron // 2
 mo_energy = np.asarray(mf.mo_energy)
 C = np.asarray(mf.mo_coeff)
@@ -176,11 +141,11 @@ print("kmesh", kmesh)
 print("basis", basis)
 print("suffix", suffix)
 print("cuda", args.cuda)
-print("M", args.M)
 print("exact", args.exact)
+print("verbose", args.verbose)
 print("ov_ref", args.ov_ref)
 print("ov_opt", args.ov_opt)
-print("nocc", nocc, "nmo", mo_energy.shape[-1], "nkpts", len(kpts))
+print("nocc", nocc, "nmo", mo_energy.shape[-1], "nkpts", len(mf.kpts))
 print("SCF energy", mf.e_tot)
 print("OV THC", ov_chk)
 
@@ -189,16 +154,19 @@ X, W = load_thc(ov_chk, C)
 print("load THC time", time.time() - t0)
 print("nth", X.shape[1])
 
-emp2_lt = laplace_mp2_from_thc(X, W, mo_energy, nocc, kmesh, args.M)
-print("LT THC MP2 energy    = %.16e" % emp2_lt.detach().cpu().numpy())
+t0 = time.time()
+Rleft, Rright = build_Rov_thc(X, W, nocc, kmesh)
+print("build THC-R time", time.time() - t0)
+emp2_custom = canonical_mp2_from_Rlr(Rleft, Rright, mo_energy, nocc, kmesh, verbose=args.verbose)
+print("custom THC MP2 energy = %.16e" % emp2_custom.detach().cpu().numpy())
 
 if args.exact:
     mf_isdf = mf.copy()
-    mf_isdf.with_df = fft.ISDF(mf.cell, kpts)
+    mf_isdf.with_df = fft.ISDF(mf.cell, mf.kpts)
     mf_isdf.with_df._isdf = ov_chk
     mf_isdf.with_df.build()
     pt = mp.KMP2(mf_isdf)
     pt.verbose = 0
     emp2_pyscf, _ = pt.kernel(with_t2=False)
-    print("PySCF THC MP2 energy = %.16e" % emp2_pyscf)
-    print("LT - PySCF           = %.16e" % (emp2_lt.detach().cpu().numpy() - emp2_pyscf))
+    print("PySCF THC MP2 energy  = %.16e" % emp2_pyscf)
+    print("custom - PySCF        = %.16e" % (emp2_custom.detach().cpu().numpy() - emp2_pyscf))
