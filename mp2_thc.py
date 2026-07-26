@@ -61,8 +61,19 @@ def apply_laplace_X(X, mo_energy, nocc, beta, weight):
     return Xo, Xv
 
 
+def build_pair(Xo, Xv, k1, k2):
+    P = torch.einsum("kIi,kIa->kIia", Xo[k1].conj(), Xv[k2])
+    return P.reshape((len(k1), Xo.shape[1], -1))
+
+
+def build_pair_one(Xo, Xv, k1, k2):
+    P = torch.einsum("Ii,Ia->Iia", Xo[k1].conj(), Xv[k2])
+    return P.reshape((Xo.shape[1], -1))
+
+
 def laplace_mp2_from_thc(X, W, mo_energy, nocc, kmesh, M):
     nkpts = X.shape[0]
+    nvir = X.shape[-1] - nocc
     k = torch.arange(nkpts, device=device)
     neg = utils.negative_k(k, kmesh).to(device=device)
     kq = utils.add_k(k[:, None], k[None, :], kmesh).to(device=device)
@@ -72,23 +83,30 @@ def laplace_mp2_from_thc(X, W, mo_energy, nocc, kmesh, M):
     for ibeta, (beta, weight) in enumerate(get_quadrature(mo_energy, nocc, M)):
         t0 = time.time()
         Xo, Xv = apply_laplace_X(X, mo_energy, nocc, beta, weight)
-        Oo = torch.einsum("kIi,kKi->kIK", Xo.conj(), Xo)
-        Vv = torch.einsum("kIa,kKa->kIK", Xv, Xv.conj())
         J_beta = torch.tensor(0.0, dtype=complex_dtype, device=device)
         K_beta = torch.tensor(0.0, dtype=complex_dtype, device=device)
         for q in range(nkpts):
             kp = kq[:, q]
             km = kq[:, neg[q]]
-            A = torch.einsum("kIK,kIK->IK", Oo, Vv[kp])
-            B = torch.einsum("kJL,kJL->JL", Oo, Vv[km])
-            J_beta += torch.einsum("IJ,KL,IK,JL->", W[q], W[q].conj(), A, B)
+            Pia = build_pair(Xo, Xv, k, kp)
+            Pjb = build_pair(Xo, Xv, k, km)
+            T = torch.einsum("kIp,IJ->kJp", Pia, W[q])
+            G = torch.einsum("kIp,lIq->klpq", T, Pjb)
+            J_beta += torch.sum(G * G.conj())
             for ik in range(nkpts):
-                km_ik = km
-                q2 = utils.add_k(km_ik, -ik, kmesh).to(device=device)
-                K_beta += torch.einsum(
-                    "IJ,lKL,IK,IL,lJL,lJK->",
-                    W[q], W[q2].conj(), Oo[ik], Vv[kp[ik]], Oo, Vv[km],
-                )
+                ka = kp[ik]
+                for il in range(nkpts):
+                    kb = km[il]
+                    q2 = utils.add_k(kb, -ik, kmesh).item()
+                    Pib = build_pair_one(Xo, Xv, ik, kb)
+                    Pja = build_pair_one(Xo, Xv, il, ka)
+                    T2 = Pib.T @ W[q2]
+                    H = T2 @ Pja
+                    K_beta += torch.einsum(
+                        "iajb,ibja->",
+                        G[ik, il].reshape((nocc, nvir, nocc, nvir)),
+                        H.reshape((nocc, nvir, nocc, nvir)).conj(),
+                    )
         J += J_beta
         K += K_beta
         print("beta %2d  beta %.8e  weight %.8e  J %.12e  K %.12e  time %.4f" % (
