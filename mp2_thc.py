@@ -187,6 +187,7 @@ print("OV THC", ov_chk)
 t0 = time.time()
 X, W = load_thc(ov_chk, C)
 print("load THC time", time.time() - t0)
+print("nth", X.shape[1])
 
 emp2_lt = laplace_mp2_from_thc(X, W, mo_energy, nocc, kmesh, args.M)
 print("LT THC MP2 energy    = %.16e" % emp2_lt.detach().cpu().numpy())

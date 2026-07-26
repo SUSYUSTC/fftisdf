@@ -144,6 +144,7 @@ print("SCF energy", mf.e_tot)
 t0 = time.time()
 R = build_Rov(mf, nocc, kpts_int, kmesh)
 print("build R time", time.time() - t0)
+print("naux", R.shape[2])
 
 emp2_lt = laplace_mp2_from_R(R, mo_energy, nocc, kmesh, args.M)
 print("LT DF MP2 energy     = %.16e" % emp2_lt.detach().cpu().numpy())
