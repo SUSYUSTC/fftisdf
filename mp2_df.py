@@ -109,6 +109,7 @@ parser.add_argument("basis")
 parser.add_argument("-suffix", default=None)
 parser.add_argument("-cuda", type=int, default=None)
 parser.add_argument("-M", type=int, default=12)
+parser.add_argument("--exact", action="store_true")
 args = parser.parse_args()
 
 device = torch.device(f"cuda:{args.cuda}" if args.cuda is not None else "cpu")
@@ -136,6 +137,7 @@ print("basis", basis)
 print("suffix", suffix)
 print("cuda", args.cuda)
 print("M", args.M)
+print("exact", args.exact)
 print("nocc", nocc, "nmo", mo_energy.shape[-1], "nkpts", len(kpts))
 print("SCF energy", mf.e_tot)
 
@@ -146,8 +148,9 @@ print("build R time", time.time() - t0)
 emp2_lt = laplace_mp2_from_R(R, mo_energy, nocc, kmesh, args.M)
 print("LT DF MP2 energy     = %.16e" % emp2_lt.detach().cpu().numpy())
 
-pt = mp.KMP2(mf)
-pt.verbose = 0
-emp2_pyscf, _ = pt.kernel(with_t2=False)
-print("PySCF MP2 energy     = %.16e" % emp2_pyscf)
-print("LT - PySCF           = %.16e" % (emp2_lt.detach().cpu().numpy() - emp2_pyscf))
+if args.exact:
+    pt = mp.KMP2(mf)
+    pt.verbose = 0
+    emp2_pyscf, _ = pt.kernel(with_t2=False)
+    print("PySCF MP2 energy     = %.16e" % emp2_pyscf)
+    print("LT - PySCF           = %.16e" % (emp2_lt.detach().cpu().numpy() - emp2_pyscf))
