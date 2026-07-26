@@ -99,7 +99,7 @@ def selected_grid_transform(cell, coords, ix_sel, kpts, iop, mesh=None):
     return perm_I, L_frac_I
 
 
-def valid_isdf_op_ids(cell, coords, ix_sel, kpts, mesh=None, tol=1e-10):
+def valid_isdf_op_ids(cell, coords, ix_sel, kpts, mesh=None, tol=1e-6):
     # A crystal/k-point symmetry is usable for ISDF only if it also acts as an
     # exact permutation of the chosen finite grid and closes the selected points.
     if mesh is None:
@@ -282,7 +282,7 @@ def symmetrize_ao_operator(symm, A):
     return A_avg / symm.nops
 
 
-def classify_grid_by_symmetry(cell, mesh, coords=None, tol=1e-10):
+def classify_grid_by_symmetry(cell, mesh, coords=None, tol=1e-6):
     # Find all space-group operations that preserve the chosen mesh, then
     # classify grid points into orbits under those operations.
     #
