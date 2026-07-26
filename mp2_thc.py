@@ -71,6 +71,22 @@ def build_pair_one(Xo, Xv, k1, k2):
     return P.reshape((Xo.shape[1], -1))
 
 
+def build_R_pair_left(P, W):
+    return torch.einsum("kIp,IJ->kJp", P, W)
+
+
+def build_R_pair_right(P):
+    return P
+
+
+def build_R_pair_one_left(P, W):
+    return P.T @ W
+
+
+def build_R_pair_one_right(P):
+    return P.T
+
+
 def laplace_mp2_from_thc(X, W, mo_energy, nocc, kmesh, M):
     nkpts = X.shape[0]
     nvir = X.shape[-1] - nocc
@@ -90,8 +106,9 @@ def laplace_mp2_from_thc(X, W, mo_energy, nocc, kmesh, M):
             km = kq[:, neg[q]]
             Pia = build_pair(Xo, Xv, k, kp)
             Pjb = build_pair(Xo, Xv, k, km)
-            T = torch.einsum("kIp,IJ->kJp", Pia, W[q])
-            G = torch.einsum("kIp,lIq->klpq", T, Pjb)
+            Ria = build_R_pair_left(Pia, W[q])
+            Rjb = build_R_pair_right(Pjb)
+            G = torch.einsum("kxp,lxq->klpq", Ria, Rjb)
             J_beta += torch.sum(G * G.conj())
             for ik in range(nkpts):
                 ka = kp[ik]
@@ -100,8 +117,9 @@ def laplace_mp2_from_thc(X, W, mo_energy, nocc, kmesh, M):
                     q2 = utils.add_k(kb, -ik, kmesh).item()
                     Pib = build_pair_one(Xo, Xv, ik, kb)
                     Pja = build_pair_one(Xo, Xv, il, ka)
-                    T2 = Pib.T @ W[q2]
-                    H = T2 @ Pja
+                    Rib = build_R_pair_one_left(Pib, W[q2])
+                    Rja = build_R_pair_one_right(Pja)
+                    H = Rib @ Rja.T
                     K_beta += torch.einsum(
                         "iajb,ibja->",
                         G[ik, il].reshape((nocc, nvir, nocc, nvir)),
