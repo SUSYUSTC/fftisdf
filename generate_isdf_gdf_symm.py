@@ -198,7 +198,7 @@ assert utils.is_k_ordered(kpts_int, kmesh)
 cholesky_max = fft.isdf.CHOLESKY_MAX_SIZE if args.cholesky_max is None else args.cholesky_max
 fft.isdf.CHOLESKY_MAX_SIZE = cholesky_max
 cholesky_mesh = get_cholesky_mesh(cell.mesh, cholesky_max)
-f4 = lambda n: (n - 1) // 4 * 4 + 4
+f4 = lambda n: (int(n) - 1) // 4 * 4 + 4
 cholesky_mesh = tuple([f4(m) for m in cholesky_mesh])  # make sure the mesh is a multiple of 4
 
 C = np.asarray(mf.mo_coeff)
@@ -248,7 +248,6 @@ print("custom selection time =", time.time() - t0)
 print("X_ao shape            =", X_ao.shape)
 print("selected ix shape     =", ix_sel.shape)
 print("selected group shape  =", group_sel.shape)
-print("first 20 ix           =", ix_sel[:20])
 
 complex_dtype = torch.complex128
 real_dtype = torch.float64
