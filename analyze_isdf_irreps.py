@@ -10,29 +10,29 @@ import libsymm
 import system_common
 
 
-def build_selected_grid_representation(symm, perm, phase, conjugate=True):
+def build_selected_grid_operator(symm, perm, phase, conjugate=True):
     # Representation on the compact translation-projected selected-grid basis
     # |k,I>.  For operation g,
     #
     #     |k,I> -> phase[g,k,I]^* |gk,gI>
     #
-    # with conjugate=True.  This is the same selected-grid convention used by
-    # transform_isdf_X.  The conjugate convention does not change the block
-    # dimensions, but keeping it aligned with X avoids later confusion.
+    # This is a monomial matrix: one nonzero entry per column.  Store only the
+    # target row and phase instead of materializing the sparse matrix.
     nops = symm.nops
     nkpts = symm.kmap.shape[0]
     nI = perm.shape[1]
     n = nkpts * nI
 
-    D = torch.zeros((nops, n, n), dtype=symm.dtype, device=symm.device)
+    row = torch.empty((nops, n), dtype=torch.long, device=symm.device)
+    val = torch.empty((nops, n), dtype=symm.dtype, device=symm.device)
     for iop in range(nops):
         for k in range(nkpts):
             kg = int(symm.kmap[k, iop])
             phase_k = phase[iop, k].conj() if conjugate else phase[iop, k]
-            row = kg * nI + perm[iop]
             col = k * nI + torch.arange(nI, device=symm.device)
-            D[iop, row, col] = phase_k
-    return D
+            row[iop, col] = kg * nI + perm[iop]
+            val[iop, col] = phase_k
+    return row, val
 
 
 def build_ao_representation(symm):
@@ -72,6 +72,22 @@ def symmetrize_matrix(D, A):
     return A_avg / D.shape[0]
 
 
+def symmetrize_matrix_monomial(row, val, A):
+    A_avg = torch.zeros_like(A)
+    for iop in range(row.shape[0]):
+        A_avg += transform_matrix_monomial(row, val, A, iop)
+    return A_avg / row.shape[0]
+
+
+def transform_matrix_monomial(row, val, A, iop):
+    r = row[iop]
+    v = val[iop]
+    A_g = v[:, None] * A * v.conj()[None, :]
+    out = torch.zeros_like(A)
+    out[r[:, None], r[None, :]] = A_g
+    return out
+
+
 def group_degenerate_eigenvalues(e, tol):
     groups = []
     i0 = 0
@@ -91,6 +107,19 @@ def character_vectors(D, Q, groups):
         Qa = Q[:, i0:i1]
         chi = torch.einsum("ia,oij,ja->o", Qa.conj(), D, Qa)
         chars.append(chi)
+    return chars
+
+
+def character_vectors_monomial(row, val, Q, groups):
+    chars = []
+    for i0, i1 in groups:
+        Qa = Q[:, i0:i1]
+        chi = []
+        for iop in range(row.shape[0]):
+            r = row[iop]
+            v = val[iop]
+            chi.append(torch.einsum("ia,i,ia->", Qa[r].conj(), v, Qa))
+        chars.append(torch.stack(chi))
     return chars
 
 
@@ -149,6 +178,30 @@ def decompose_representation(D, nkpts, ninner, tol):
     e, Q = torch.linalg.eigh(A_sym)
     groups = group_degenerate_eigenvalues(e.detach().cpu().numpy(), tol)
     chars = character_vectors(D, Q, groups)
+    classes = group_equivalent_irreps(groups, chars, tol * 10)
+    summary = summarize_classes(groups, classes)
+    return summary, chars, max(comm_err)
+
+
+def decompose_monomial_representation(row, val, nkpts, ninner, tol):
+    n = nkpts * ninner
+    A = torch.randn((n, n), dtype=torch.float64)
+    A = A + 1j * torch.randn((n, n), dtype=torch.float64)
+    A = (A + A.conj().T) / 2.0
+
+    A = translation_project_matrix(A, nkpts, ninner)
+    A_sym = symmetrize_matrix_monomial(row, val, A)
+    A_sym = (A_sym + A_sym.conj().T) / 2.0
+
+    comm_err = []
+    for iop in range(row.shape[0]):
+        A_g = transform_matrix_monomial(row, val, A_sym, iop)
+        err = torch.linalg.norm(A_g - A_sym) / torch.linalg.norm(A_sym)
+        comm_err.append(err.item())
+
+    e, Q = torch.linalg.eigh(A_sym)
+    groups = group_degenerate_eigenvalues(e.detach().cpu().numpy(), tol)
+    chars = character_vectors_monomial(row, val, Q, groups)
     classes = group_equivalent_irreps(groups, chars, tol * 10)
     summary = summarize_classes(groups, classes)
     return summary, chars, max(comm_err)
@@ -215,7 +268,7 @@ coords = cell_isdf.gen_uniform_grids(cell_isdf.mesh)
 
 symm = libsymm.PBCSymmetry(cell_isdf, kmesh, kpts, dtype=torch.complex128)
 perm, phase = libsymm.build_isdf_grid_transform(symm, coords, ix_sel, mesh=cell_isdf.mesh)
-D_grid = build_selected_grid_representation(symm, perm, phase)
+row_grid, val_grid = build_selected_grid_operator(symm, perm, phase)
 D_ao = build_ao_representation(symm)
 
 nkpts = len(kpts)
@@ -229,7 +282,7 @@ W_symm = libsymm.symmetrize_isdf_W_fast(symm, W, perm, phase)
 X_symm_err = torch.linalg.norm(X_symm - X) / torch.linalg.norm(X)
 W_symm_err = torch.linalg.norm(W_symm - W) / torch.linalg.norm(W)
 
-grid_summary, grid_chars, grid_comm = decompose_representation(D_grid, nkpts, nI, args.tol)
+grid_summary, grid_chars, grid_comm = decompose_monomial_representation(row_grid, val_grid, nkpts, nI, args.tol)
 ao_summary, ao_chars, ao_comm = decompose_representation(D_ao, nkpts, nao, args.tol)
 
 print("system =", system)
@@ -249,7 +302,7 @@ print("nao =", nao)
 print("n symmetry operations =", symm.nops)
 print("grid representation size =", nkpts * nI)
 print("AO representation size =", nkpts * nao)
-print("grid max commutator rel_fro =", grid_comm)
+print("grid max invariance rel_fro =", grid_comm)
 print("AO max commutator rel_fro =", ao_comm)
 print("loaded X symmetry rel_fro =", X_symm_err.item())
 print("loaded W symmetry rel_fro =", W_symm_err.item())
