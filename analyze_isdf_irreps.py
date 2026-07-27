@@ -10,31 +10,6 @@ import libsymm
 import system_common
 
 
-def build_selected_grid_operator(symm, perm, phase, conjugate=True):
-    # Representation on the compact translation-projected selected-grid basis
-    # |k,I>.  For operation g,
-    #
-    #     |k,I> -> phase[g,k,I]^* |gk,gI>
-    #
-    # This is a monomial matrix: one nonzero entry per column.  Store only the
-    # target row and phase instead of materializing the sparse matrix.
-    nops = symm.nops
-    nkpts = symm.kmap.shape[0]
-    nI = perm.shape[1]
-    n = nkpts * nI
-
-    row = torch.empty((nops, n), dtype=torch.long, device=symm.device)
-    val = torch.empty((nops, n), dtype=symm.dtype, device=symm.device)
-    for iop in range(nops):
-        for k in range(nkpts):
-            kg = int(symm.kmap[k, iop])
-            phase_k = phase[iop, k].conj() if conjugate else phase[iop, k]
-            col = k * nI + torch.arange(nI, device=symm.device)
-            row[iop, col] = kg * nI + perm[iop]
-            val[iop, col] = phase_k
-    return row, val
-
-
 def build_ao_representation(symm):
     # Representation on the compact translation-projected AO basis |k,a>.
     # With this convention, X transforms as
@@ -72,20 +47,20 @@ def symmetrize_matrix(D, A):
     return A_avg / D.shape[0]
 
 
-def symmetrize_matrix_monomial(row, val, A):
-    A_avg = torch.zeros_like(A)
-    for iop in range(row.shape[0]):
-        A_avg += transform_matrix_monomial(row, val, A, iop)
-    return A_avg / row.shape[0]
-
-
-def transform_matrix_monomial(row, val, A, iop):
-    r = row[iop]
-    v = val[iop]
-    A_g = v[:, None] * A * v.conj()[None, :]
-    out = torch.zeros_like(A)
-    out[r[:, None], r[None, :]] = A_g
-    return out
+def build_flat_monomial_from_blocks(kmap, perm, phase):
+    nops = perm.shape[0]
+    nkpts = kmap.shape[0]
+    ninner = perm.shape[1]
+    n = nkpts * ninner
+    row = torch.empty((nops, n), dtype=torch.long, device=perm.device)
+    val = torch.empty((nops, n), dtype=phase.dtype, device=phase.device)
+    for iop in range(nops):
+        for k in range(nkpts):
+            kg = int(kmap[k, iop])
+            col = k * ninner + torch.arange(ninner, device=perm.device)
+            row[iop, col] = kg * ninner + perm[iop]
+            val[iop, col] = phase[iop, k]
+    return row, val
 
 
 def group_degenerate_eigenvalues(e, tol):
@@ -114,12 +89,8 @@ def character_vectors_monomial(row, val, Q, groups):
     chars = []
     for i0, i1 in groups:
         Qa = Q[:, i0:i1]
-        chi = []
-        for iop in range(row.shape[0]):
-            r = row[iop]
-            v = val[iop]
-            chi.append(torch.einsum("ia,i,ia->", Qa[r].conj(), v, Qa))
-        chars.append(torch.stack(chi))
+        chi = torch.einsum("oia,oi,ia->o", Qa[row].conj(), val, Qa)
+        chars.append(chi)
     return chars
 
 
@@ -183,24 +154,64 @@ def decompose_representation(D, nkpts, ninner, tol):
     return summary, chars, max(comm_err)
 
 
-def decompose_monomial_representation(row, val, nkpts, ninner, tol):
-    n = nkpts * ninner
-    A = torch.randn((n, n), dtype=torch.float64)
-    A = A + 1j * torch.randn((n, n), dtype=torch.float64)
-    A = (A + A.conj().T) / 2.0
+def symmetrize_block_matrix_monomial(kmap, perm, phase, A):
+    A_avg = torch.zeros_like(A)
+    nops = perm.shape[0]
+    nkpts = A.shape[0]
+    for iop in range(nops):
+        for k in range(nkpts):
+            kg = int(kmap[k, iop])
+            p = perm[iop]
+            v = phase[iop, k]
+            A_g = v[:, None] * A[k] * v.conj()[None, :]
+            A_avg[kg, p[:, None], p[None, :]] += A_g
+    return A_avg / nops
 
-    A = translation_project_matrix(A, nkpts, ninner)
-    A_sym = symmetrize_matrix_monomial(row, val, A)
-    A_sym = (A_sym + A_sym.conj().T) / 2.0
+
+def transform_block_matrix_monomial(kmap, perm, phase, A, iop):
+    out = torch.zeros_like(A)
+    for k in range(A.shape[0]):
+        kg = int(kmap[k, iop])
+        p = perm[iop]
+        v = phase[iop, k]
+        A_g = v[:, None] * A[k] * v.conj()[None, :]
+        out[kg, p[:, None], p[None, :]] = A_g
+    return out
+
+
+def block_eigh_to_global(e, Qk):
+    nkpts, ninner = e.shape
+    n = nkpts * ninner
+    e_flat = e.reshape(n)
+    order = torch.argsort(e_flat)
+    e_sort = e_flat[order]
+
+    Q = torch.zeros((n, n), dtype=Qk.dtype, device=Qk.device)
+    for col_new, col_old in enumerate(order):
+        k = int(col_old // ninner)
+        a = int(col_old % ninner)
+        Q[k * ninner:(k + 1) * ninner, col_new] = Qk[k, :, a]
+    return e_sort, Q
+
+
+def decompose_monomial_representation(kmap, perm, phase, nkpts, ninner, tol):
+    A = torch.randn((nkpts, ninner, ninner), dtype=torch.float64)
+    A = A + 1j * torch.randn((nkpts, ninner, ninner), dtype=torch.float64)
+    A = (A + A.conj().transpose(-1, -2)) / 2.0
+
+    A_sym = symmetrize_block_matrix_monomial(kmap, perm, phase, A)
+    A_sym = (A_sym + A_sym.conj().transpose(-1, -2)) / 2.0
 
     comm_err = []
-    for iop in range(row.shape[0]):
-        A_g = transform_matrix_monomial(row, val, A_sym, iop)
+    for iop in range(perm.shape[0]):
+        A_g = transform_block_matrix_monomial(kmap, perm, phase, A_sym, iop)
         err = torch.linalg.norm(A_g - A_sym) / torch.linalg.norm(A_sym)
         comm_err.append(err.item())
 
-    e, Q = torch.linalg.eigh(A_sym)
+    e, Qk = torch.linalg.eigh(A_sym)
+    e, Q = block_eigh_to_global(e, Qk)
     groups = group_degenerate_eigenvalues(e.detach().cpu().numpy(), tol)
+    row, val = build_flat_monomial_from_blocks(kmap, perm, phase)
     chars = character_vectors_monomial(row, val, Q, groups)
     classes = group_equivalent_irreps(groups, chars, tol * 10)
     summary = summarize_classes(groups, classes)
@@ -268,7 +279,7 @@ coords = cell_isdf.gen_uniform_grids(cell_isdf.mesh)
 
 symm = libsymm.PBCSymmetry(cell_isdf, kmesh, kpts, dtype=torch.complex128)
 perm, phase = libsymm.build_isdf_grid_transform(symm, coords, ix_sel, mesh=cell_isdf.mesh)
-row_grid, val_grid = build_selected_grid_operator(symm, perm, phase)
+phase_grid = phase.conj()
 D_ao = build_ao_representation(symm)
 
 nkpts = len(kpts)
@@ -282,7 +293,7 @@ W_symm = libsymm.symmetrize_isdf_W_fast(symm, W, perm, phase)
 X_symm_err = torch.linalg.norm(X_symm - X) / torch.linalg.norm(X)
 W_symm_err = torch.linalg.norm(W_symm - W) / torch.linalg.norm(W)
 
-grid_summary, grid_chars, grid_comm = decompose_monomial_representation(row_grid, val_grid, nkpts, nI, args.tol)
+grid_summary, grid_chars, grid_comm = decompose_monomial_representation(symm.kmap, perm, phase_grid, nkpts, nI, args.tol)
 ao_summary, ao_chars, ao_comm = decompose_representation(D_ao, nkpts, nao, args.tol)
 
 print("system =", system)
