@@ -25,10 +25,24 @@ def load_isdf(chkfile):
     return X, W
 
 
-def save_isdf(chkfile, X, W):
+def load_isdf_grid(chkfile):
+    with h5py.File(chkfile, "r") as f:
+        mesh = np.asarray(f["mesh"])
+        ix_sel = np.asarray(f["ix_sel"])
+        group_sel = np.asarray(f["group_sel"]) if "group_sel" in f else None
+    return mesh, ix_sel, group_sel
+
+
+def save_isdf(chkfile, X, W, mesh=None, ix_sel=None, group_sel=None):
     with h5py.File(chkfile, "w") as f:
         f["inpv_kpt"] = X
         f["coul_kpt"] = W
+        if mesh is not None:
+            f["mesh"] = np.asarray(mesh, dtype=np.int64)
+        if ix_sel is not None:
+            f["ix_sel"] = np.asarray(ix_sel, dtype=np.int64)
+        if group_sel is not None:
+            f["group_sel"] = np.asarray(group_sel, dtype=np.int64)
 
 
 def X_mo_from_ao(X_ao, C, C128=None, force_complex128=False):

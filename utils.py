@@ -460,23 +460,30 @@ def thc_ovvo_error2_from_mo(Xo_A, Xv_A, W_A, Xo_B, Xv_B, W_B, kmesh, by_q=False)
 
 
 @maybe_profile
-def thc_ovvo_solve_w_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, kmesh, reg=None):
-    L_mix = thc_ovvo_build_Lbar(Xo_ref, Xv_ref, Xo, Xv, kmesh)
-    L = thc_ovvo_build_Lbar(Xo, Xv, Xo, Xv, kmesh)
-    rhs = L_mix.conj().transpose(-1, -2) @ W_ref @ L_mix
-    return torch_lstsq_oinv_PSD(L, rhs, reg=reg)
-
-
-@maybe_profile
-def thc_ovvo_solve_w_error2_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, kmesh, ref_norm2, reg=None):
+def thc_ovvo_solve_w_intermediate_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, kmesh, reg=None):
     L_mix = thc_ovvo_build_Lbar(Xo_ref, Xv_ref, Xo, Xv, kmesh)
     L = thc_ovvo_build_Lbar(Xo, Xv, Xo, Xv, kmesh)
     rhs = L_mix.conj().transpose(-1, -2) @ W_ref @ L_mix
     W = torch_lstsq_oinv_PSD(L, rhs, reg=reg)
+    return W, L, rhs
 
+
+def thc_solve_w_error2_from_intermediate(W, L, rhs, ref_norm2):
     ab = ((W.conj().transpose(-1, -2) @ rhs).diagonal(dim1=-1, dim2=-2).sum()).real
     bb = thc_inner_from_L(W, L, W).real
-    error2 = (ref_norm2 + bb - 2.0 * ab).real
+    return (ref_norm2 + bb - 2.0 * ab).real
+
+
+@maybe_profile
+def thc_ovvo_solve_w_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, kmesh, reg=None):
+    W, L, rhs = thc_ovvo_solve_w_intermediate_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, kmesh, reg=reg)
+    return W
+
+
+@maybe_profile
+def thc_ovvo_solve_w_error2_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, kmesh, ref_norm2, reg=None):
+    W, L, rhs = thc_ovvo_solve_w_intermediate_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, kmesh, reg=reg)
+    error2 = thc_solve_w_error2_from_intermediate(W, L, rhs, ref_norm2)
     return W, error2
 
 
@@ -494,23 +501,24 @@ def thc_error2_from_mo(X_A, W_A, X_B, W_B, kmesh, by_q=False):
 
 
 @maybe_profile
-def thc_solve_w_from_mo(X_ref, W_ref, X, kmesh, reg=None):
-    L_mix = thc_build_Lbar(X_ref, X, kmesh)
-    L = thc_build_Lbar(X, X, kmesh)
-    rhs = L_mix.conj().transpose(-1, -2) @ W_ref @ L_mix
-    return torch_lstsq_oinv_PSD(L, rhs, reg=reg)
-
-
-@maybe_profile
-def thc_solve_w_error2_from_mo(X_ref, W_ref, X, kmesh, ref_norm2, reg=None):
+def thc_solve_w_intermediate_from_mo(X_ref, W_ref, X, kmesh, reg=None):
     L_mix = thc_build_Lbar(X_ref, X, kmesh)
     L = thc_build_Lbar(X, X, kmesh)
     rhs = L_mix.conj().transpose(-1, -2) @ W_ref @ L_mix
     W = torch_lstsq_oinv_PSD(L, rhs, reg=reg)
+    return W, L, rhs
 
-    ab = ((W.conj().transpose(-1, -2) @ rhs).diagonal(dim1=-1, dim2=-2).sum()).real
-    bb = thc_inner_from_L(W, L, W).real
-    error2 = (ref_norm2 + bb - 2.0 * ab).real
+
+@maybe_profile
+def thc_solve_w_from_mo(X_ref, W_ref, X, kmesh, reg=None):
+    W, L, rhs = thc_solve_w_intermediate_from_mo(X_ref, W_ref, X, kmesh, reg=reg)
+    return W
+
+
+@maybe_profile
+def thc_solve_w_error2_from_mo(X_ref, W_ref, X, kmesh, ref_norm2, reg=None):
+    W, L, rhs = thc_solve_w_intermediate_from_mo(X_ref, W_ref, X, kmesh, reg=reg)
+    error2 = thc_solve_w_error2_from_intermediate(W, L, rhs, ref_norm2)
     return W, error2
 
 
@@ -559,40 +567,44 @@ def thc_df_error2_from_mo(X, W, R, kmesh, df_norm2, by_q=False):
 
 
 @maybe_profile
-def thc_df_ov_solve_w_from_mo(Xo, Xv, R, kmesh, reg=None):
+def thc_df_ov_solve_w_intermediate_from_mo(Xo, Xv, R, kmesh, reg=None):
     A = thc_ovvo_build_Lbar(Xo, Xv, Xo, Xv, kmesh)
     B = thc_df_ov_rhs_from_mo(Xo, Xv, R, kmesh)
     W = torch_lstsq_oinv_PSD(A, B, reg=reg)
+    return W, A, B
+
+
+@maybe_profile
+def thc_df_ov_solve_w_from_mo(Xo, Xv, R, kmesh, reg=None):
+    W, A, B = thc_df_ov_solve_w_intermediate_from_mo(Xo, Xv, R, kmesh, reg=reg)
     return W
 
 
 @maybe_profile
-def thc_df_solve_w_from_mo(X, R, kmesh, reg=None):
+def thc_df_solve_w_intermediate_from_mo(X, R, kmesh, reg=None):
     A = thc_build_Lbar(X, X, kmesh)
     B = thc_df_ov_rhs_from_mo(X, X, R, kmesh)
     W = torch_lstsq_oinv_PSD(A, B, reg=reg)
+    return W, A, B
+
+
+@maybe_profile
+def thc_df_solve_w_from_mo(X, R, kmesh, reg=None):
+    W, A, B = thc_df_solve_w_intermediate_from_mo(X, R, kmesh, reg=reg)
     return W
 
 
 @maybe_profile
 def thc_df_ov_solve_w_error2_from_mo(Xo, Xv, R, kmesh, df_norm2, reg=None):
-    A = thc_ovvo_build_Lbar(Xo, Xv, Xo, Xv, kmesh)
-    B = thc_df_ov_rhs_from_mo(Xo, Xv, R, kmesh)
-    W = torch_lstsq_oinv_PSD(A, B, reg=reg)
-    ab = torch.sum(W.conj() * B).real
-    bb = thc_inner_from_L(W, A, W).real
-    error2 = (df_norm2 + bb - 2.0 * ab).real
+    W, A, B = thc_df_ov_solve_w_intermediate_from_mo(Xo, Xv, R, kmesh, reg=reg)
+    error2 = thc_solve_w_error2_from_intermediate(W, A, B, df_norm2)
     return W, error2
 
 
 @maybe_profile
 def thc_df_solve_w_error2_from_mo(X, R, kmesh, df_norm2, reg=None):
-    A = thc_build_Lbar(X, X, kmesh)
-    B = thc_df_ov_rhs_from_mo(X, X, R, kmesh)
-    W = torch_lstsq_oinv_PSD(A, B, reg=reg)
-    ab = torch.sum(W.conj() * B).real
-    bb = thc_inner_from_L(W, A, W).real
-    error2 = (df_norm2 + bb - 2.0 * ab).real
+    W, A, B = thc_df_solve_w_intermediate_from_mo(X, R, kmesh, reg=reg)
+    error2 = thc_solve_w_error2_from_intermediate(W, A, B, df_norm2)
     return W, error2
 
 
