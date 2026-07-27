@@ -49,10 +49,16 @@ def screen_gdf_tensor(R, eps_inv_half, kmesh):
     return R
 
 
-def save_isdf(chkfile, X, W):
+def save_isdf(chkfile, X, W, mesh=None, ix_sel=None, group_sel=None):
     with h5py.File(chkfile, "w") as f:
         f["inpv_kpt"] = X
         f["coul_kpt"] = W
+        if mesh is not None:
+            f["mesh"] = np.asarray(mesh, dtype=np.int64)
+        if ix_sel is not None:
+            f["ix_sel"] = np.asarray(ix_sel, dtype=np.int64)
+        if group_sel is not None:
+            f["group_sel"] = np.asarray(group_sel, dtype=np.int64)
 
 
 def k1k2_to_k1q(R, kpts_int, kmesh):
@@ -356,7 +362,7 @@ else:
     W_symm_err = 0.0
     error2_sym = error2
     rel_error_sym = rel_error
-save_isdf(chkfile, X_ao, W.detach().cpu().numpy())
+save_isdf(chkfile, X_ao, W.detach().cpu().numpy(), mesh=cell_isdf.mesh, ix_sel=ix_sel, group_sel=group_sel)
 print("Saved ISDF-GDF chk =", chkfile)
 
 print("")
