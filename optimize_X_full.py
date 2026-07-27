@@ -232,9 +232,8 @@ optimization_loss_args = (
 X_ao_opt = optimize_X_common.ao_from_state(X_opt.detach(), C, C128, state_AO)
 W_save = W_opt.detach()
 if use_symm:
-    X_symm = libsymm.symmetrize_isdf_X_fast(symm, X_ao_opt, perm, phase)
+    X_ao_opt = libsymm.symmetrize_isdf_X_fast(symm, X_ao_opt, perm, phase)
     W_symm = libsymm.symmetrize_isdf_W_fast(symm, W_save, perm, phase)
-    X_symm_err = torch.linalg.norm(X_symm - X_ao_opt) / torch.linalg.norm(X_ao_opt)
     W_symm_err = torch.linalg.norm(W_symm - W_save) / torch.linalg.norm(W_save)
 
 print("final loss      = %.16e" % loss_opt.item())
@@ -243,7 +242,6 @@ print("final rel_error = %.16e" % rel_error_opt.item())
 print("final norm_loss = %.16e" % norm_loss_opt.item())
 print("final reg       = %.16e" % reg_opt.item())
 if use_symm:
-    print("final X symm err = %.16e" % X_symm_err.item())
     print("final W symm err = %.16e" % W_symm_err.item())
 
 if args.save:
