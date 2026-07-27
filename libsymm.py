@@ -249,10 +249,11 @@ def transform_isdf_X(symm, X, perm, phase, iop):
 
 
 def transform_isdf_W(symm, W, perm, phase, iop):
-    # W[q, I, J] has two selected-grid indices. The first carries the conjugate
-    # grid phase and the second carries the direct grid phase.
-    W = transform_grid(W, perm, phase, iop, axis=1, kaxis=0, conjugate=True)
-    W = transform_grid(W, perm, phase, iop, axis=2, kaxis=0)
+    # W[q, I, J] has two selected-grid indices. In the PySCF/ISDF ERI
+    # convention used here, the first selected-grid index carries the direct
+    # grid phase and the second carries the conjugate grid phase.
+    W = transform_grid(W, perm, phase, iop, axis=1, kaxis=0)
+    W = transform_grid(W, perm, phase, iop, axis=2, kaxis=0, conjugate=True)
     W = symm.transform_k(W, iop, axis=0)
     return W
 
@@ -296,7 +297,7 @@ def symmetrize_isdf_W_fast(symm, W, perm, phase):
     nops, nkpts = symm.kmap.T.shape
     nI = W.shape[1]
 
-    W_g = phase.conj()[:, :, :, None] * phase[:, :, None, :] * W[None]
+    W_g = phase[:, :, :, None] * phase.conj()[:, :, None, :] * W[None]
 
     W_all = torch.empty((nops, nkpts, nI, nI), dtype=W.dtype, device=W.device)
     iop = torch.arange(nops, device=W.device)[:, None, None, None]
