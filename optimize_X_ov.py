@@ -18,12 +18,17 @@ def fmt_label(x):
 
 
 def get_W_error2_from_X(X, reg, ref_norm2_use, force_complex128=False):
+    if use_real:
+        negative_use = negative128 if force_complex128 else negative
+        X = optimize_X_common.symmetrize_real_gauge(X, negative_use)
     X_ao = optimize_X_common.ao_from_state(X, C, C128, state_AO, force_complex128=force_complex128)
     if use_symm:
         symm_use = symm128 if force_complex128 else symm
         perm_use = perm128 if force_complex128 else perm
         phase_use = phase128 if force_complex128 else phase
         X_ao = libsymm.symmetrize_isdf_X_fast(symm_use, X_ao, perm_use, phase_use)
+    if use_real:
+        X_ao = optimize_X_common.symmetrize_real_gauge(X_ao, negative_use)
     X_mo = optimize_X_common.X_mo_from_ao(X_ao, C, C128, force_complex128=force_complex128)
     Xo = X_mo[:, :, :nocc]
     Xv = X_mo[:, :, nocc:]
@@ -39,12 +44,17 @@ def get_W_error2_from_X(X, reg, ref_norm2_use, force_complex128=False):
     )
     if use_symm:
         W = libsymm.symmetrize_isdf_W_fast(symm_use, W, perm_use, phase_use)
+    if use_real:
+        W = optimize_X_common.symmetrize_real_gauge(W, negative_use)
     error2 = utils.thc_solve_w_error2_from_intermediate(W, L, rhs, ref_norm2_use)
     return W, error2
 
 
 @utils.maybe_profile
 def get_abs_norm_loss(X, W, force_complex128=False):
+    if use_real:
+        negative_use = negative128 if force_complex128 else negative
+        X = optimize_X_common.symmetrize_real_gauge(X, negative_use)
     if (not use_symm) and (not state_AO):
         X_mo = X
     else:
@@ -54,6 +64,8 @@ def get_abs_norm_loss(X, W, force_complex128=False):
             perm_use = perm128 if force_complex128 else perm
             phase_use = phase128 if force_complex128 else phase
             X_ao = libsymm.symmetrize_isdf_X_fast(symm_use, X_ao, perm_use, phase_use)
+        if use_real:
+            X_ao = optimize_X_common.symmetrize_real_gauge(X_ao, negative_use)
         X_mo = optimize_X_common.X_mo_from_ao(X_ao, C, C128, force_complex128=force_complex128)
     Xo = X_mo[:, :, :nocc]
     Xv = X_mo[:, :, nocc:]
@@ -86,6 +98,7 @@ def print_header():
     print("nsteps_factor  =", nsteps_factor)
     print("state_AO       =", state_AO)
     print("use_symm       =", use_symm)
+    print("use_real       =", use_real)
     print("ISDF init cache =", init_chk)
     print("ISDF ref cache  =", ref_chk)
     if use_symm:
@@ -123,6 +136,7 @@ parser.add_argument("--use_Fnorm", action="store_true")
 parser.add_argument("--screen", action="store_true")
 parser.add_argument("--save", action="store_true")
 parser.add_argument("--symm", action="store_true")
+parser.add_argument("--real", action="store_true")
 args = parser.parse_args()
 
 if args.device is None:
@@ -149,6 +163,8 @@ screen_tag = "screen" if screen else "bare"
 state_AO = False
 use_symm = args.symm
 symm_tag = "_symm" if use_symm else ""
+use_real = args.real
+real_tag = "_real" if use_real else ""
 use_Fnorm = args.use_Fnorm
 init_reg = args.init_reg
 
@@ -156,8 +172,8 @@ data_dir = system_common.get_data_dir(system, basis, suffix=suffix)
 dft_pkl = os.path.join(data_dir, f"DFT_{klabel}{symm_tag}.pkl")
 init_chk = os.path.join(data_dir, f"ISDFov_{screen_tag}GDF{symm_tag}_{klabel}_c{c_isdf}.chk")
 ref_chk = os.path.join(data_dir, f"ISDFov_{screen_tag}GDF{symm_tag}_{klabel}_c{c_ref}.chk")
-opt_save_path = os.path.join(data_dir, f"opt_X_ov_{screen_tag}GDF{symm_tag}_{klabel}_c{c_isdf}_cref{c_ref}_{norm_label}.pt")
-chk_save_path = os.path.join(data_dir, f"ISDFov_opt_{screen_tag}GDF{symm_tag}_{klabel}_c{c_isdf}_cref{c_ref}_{norm_label}.chk")
+opt_save_path = os.path.join(data_dir, f"opt_X_ov_{screen_tag}GDF{symm_tag}{real_tag}_{klabel}_c{c_isdf}_cref{c_ref}_{norm_label}.pt")
+chk_save_path = os.path.join(data_dir, f"ISDFov_opt_{screen_tag}GDF{symm_tag}{real_tag}_{klabel}_c{c_isdf}_cref{c_ref}_{norm_label}.chk")
 
 if args.save:
     print("Optimization result will be saved to", opt_save_path)
@@ -205,6 +221,9 @@ else:
     symm = perm = phase = None
     symm128 = perm128 = phase128 = None
 
+negative = optimize_X_common.negative_k_indices(kmesh, device)
+negative128 = negative
+
 Xo_ref = X_ref_ao @ Cocc
 Xv_ref = X_ref_ao @ Cvir
 Xo_ref128 = X_ref_ao128 @ Cocc128
@@ -245,12 +264,18 @@ optimization_loss_args = (
     "ov",
 )
 
-X_ao_opt = optimize_X_common.ao_from_state(X_opt.detach(), C, C128, state_AO)
+X_save_state = X_opt.detach()
+if use_real:
+    X_save_state = optimize_X_common.symmetrize_real_gauge(X_save_state, negative)
+X_ao_opt = optimize_X_common.ao_from_state(X_save_state, C, C128, state_AO)
 W_save = W_opt.detach()
 if use_symm:
     X_ao_opt = libsymm.symmetrize_isdf_X_fast(symm, X_ao_opt, perm, phase)
     W_symm = libsymm.symmetrize_isdf_W_fast(symm, W_save, perm, phase)
     W_symm_err = torch.linalg.norm(W_symm - W_save) / torch.linalg.norm(W_save)
+if use_real:
+    X_ao_opt = optimize_X_common.symmetrize_real_gauge(X_ao_opt, negative)
+    W_save = optimize_X_common.symmetrize_real_gauge(W_save, negative)
 
 print("final loss      = %.16e" % loss_opt.item())
 print("final error2    = %.16e" % error2_opt.item())
@@ -263,7 +288,7 @@ if use_symm:
 if args.save:
     X_ao = X_ao_opt.cpu().numpy()
     data = {
-        "X_opt": X_opt.detach().cpu(),
+        "X_opt": X_save_state.cpu(),
         "log_reg": log_reg.detach().cpu(),
         "opt_state": opt.state_dict(),
     }

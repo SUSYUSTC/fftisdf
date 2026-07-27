@@ -77,6 +77,21 @@ def state_unproject_error(X, X_ao, C, C128, state_AO):
     return torch.linalg.norm(X_ao_check - X_ao) / torch.linalg.norm(X_ao)
 
 
+def negative_k_indices(kmesh, device):
+    idx = np.arange(np.prod(kmesh)).reshape(kmesh)
+    neg = np.empty(np.prod(kmesh), dtype=np.int64)
+    for ix in range(kmesh[0]):
+        for iy in range(kmesh[1]):
+            for iz in range(kmesh[2]):
+                k = idx[ix, iy, iz]
+                neg[k] = idx[(-ix) % kmesh[0], (-iy) % kmesh[1], (-iz) % kmesh[2]]
+    return torch.from_numpy(neg).to(device=device)
+
+
+def symmetrize_real_gauge(A, negative):
+    return (A + A[negative].conj()) / 2.0
+
+
 def ref_norm2_value(ref_norm2, ref_norm2_128, force_complex128=False):
     if force_complex128:
         return ref_norm2_128
