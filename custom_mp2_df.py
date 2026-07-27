@@ -95,6 +95,7 @@ parser.add_argument("-suffix", default=None)
 parser.add_argument("-cuda", type=int, default=None)
 parser.add_argument("--exact", action="store_true")
 parser.add_argument("--verbose", action="store_true")
+parser.add_argument("--symm", action="store_true")
 args = parser.parse_args()
 
 device = torch.device(f"cuda:{args.cuda}" if args.cuda is not None else "cpu")
@@ -103,8 +104,9 @@ kmesh = (args.kx, args.ky, args.kz)
 basis = args.basis
 suffix = args.suffix
 klabel = system_common.get_klabel(kmesh)
+symm_tag = "_symm" if args.symm else ""
 data_dir = system_common.get_data_dir(system, basis, suffix=suffix)
-dft_pkl = os.path.join(data_dir, f"DFT_{klabel}.pkl")
+dft_pkl = os.path.join(data_dir, f"DFT_{klabel}{symm_tag}.pkl")
 gdf_chk = os.path.join(data_dir, f"GDF_{klabel}.chk")
 
 with open(dft_pkl, "rb") as f:
@@ -123,8 +125,10 @@ print("suffix", suffix)
 print("cuda", args.cuda)
 print("exact", args.exact)
 print("verbose", args.verbose)
+print("symm", args.symm)
 print("nocc", nocc, "nmo", mo_energy.shape[-1], "nkpts", len(kpts))
 print("SCF energy", mf.e_tot)
+print("DFT pkl", dft_pkl)
 
 t0 = time.time()
 R = build_Rov(mf, nocc, kpts_int, kmesh)

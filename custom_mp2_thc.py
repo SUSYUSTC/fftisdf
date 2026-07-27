@@ -111,6 +111,8 @@ parser.add_argument("-suffix", default=None)
 parser.add_argument("-cuda", type=int, default=None)
 parser.add_argument("--exact", action="store_true")
 parser.add_argument("--verbose", action="store_true")
+parser.add_argument("--symm", action="store_true")
+parser.add_argument("--real", action="store_true")
 ov_group = parser.add_mutually_exclusive_group(required=True)
 ov_group.add_argument("-ov_ref", type=int, default=None)
 ov_group.add_argument("-ov_opt", default=None)
@@ -123,12 +125,14 @@ basis = args.basis
 suffix = args.suffix
 klabel = system_common.get_klabel(kmesh)
 data_dir = system_common.get_data_dir(system, basis, suffix=suffix)
-dft_pkl = os.path.join(data_dir, f"DFT_{klabel}.pkl")
+symm_tag = "_symm" if args.symm else ""
+real_tag = "_real" if args.real else ""
+dft_pkl = os.path.join(data_dir, f"DFT_{klabel}{symm_tag}.pkl")
 
 if args.ov_ref is not None:
-    ov_chk = os.path.join(data_dir, f"ISDFov_bareGDF_{klabel}_c{args.ov_ref}.chk")
+    ov_chk = os.path.join(data_dir, f"ISDFov_bareGDF{symm_tag}_{klabel}_c{args.ov_ref}.chk")
 else:
-    ov_chk = os.path.join(data_dir, f"ISDFov_opt_bareGDF_{klabel}_{args.ov_opt}.chk")
+    ov_chk = os.path.join(data_dir, f"ISDFov_opt_bareGDF{symm_tag}{real_tag}_{klabel}_{args.ov_opt}.chk")
 
 with open(dft_pkl, "rb") as f:
     mf = pickle.load(f)
@@ -143,10 +147,13 @@ print("suffix", suffix)
 print("cuda", args.cuda)
 print("exact", args.exact)
 print("verbose", args.verbose)
+print("symm", args.symm)
+print("real", args.real)
 print("ov_ref", args.ov_ref)
 print("ov_opt", args.ov_opt)
 print("nocc", nocc, "nmo", mo_energy.shape[-1], "nkpts", len(mf.kpts))
 print("SCF energy", mf.e_tot)
+print("DFT pkl", dft_pkl)
 print("OV THC", ov_chk)
 
 t0 = time.time()
