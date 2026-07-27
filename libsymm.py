@@ -271,6 +271,42 @@ def symmetrize_isdf_W(symm, W, perm, phase):
     return W_avg / symm.nops
 
 
+def symmetrize_isdf_X_fast(symm, X, perm, phase):
+    # Same operation as symmetrize_isdf_X, but performs all symmetry operations
+    # in one batched contraction and one indexed scatter.
+    nops, nkpts = symm.kmap.T.shape
+    nI = X.shape[1]
+    nao = X.shape[2]
+
+    X_g = torch.einsum("okab,kIb->okIa", symm.U.conj(), X)
+    X_g = phase.conj()[:, :, :, None] * X_g
+
+    X_all = torch.empty((nops, nkpts, nI, nao), dtype=X.dtype, device=X.device)
+    iop = torch.arange(nops, device=X.device)[:, None, None, None]
+    k = symm.kmap.T[:, :, None, None]
+    I = perm[:, None, :, None]
+    a = torch.arange(nao, device=X.device)[None, None, None, :]
+    X_all[iop, k, I, a] = X_g
+    return X_all.sum(axis=0) / nops
+
+
+def symmetrize_isdf_W_fast(symm, W, perm, phase):
+    # Same operation as symmetrize_isdf_W. This allocates an explicit
+    # nops-sized work tensor, which is worthwhile inside GPU optimization loops.
+    nops, nkpts = symm.kmap.T.shape
+    nI = W.shape[1]
+
+    W_g = phase.conj()[:, :, :, None] * phase[:, :, None, :] * W[None]
+
+    W_all = torch.empty((nops, nkpts, nI, nI), dtype=W.dtype, device=W.device)
+    iop = torch.arange(nops, device=W.device)[:, None, None, None]
+    q = symm.kmap.T[:, :, None, None]
+    I = perm[:, None, :, None]
+    J = perm[:, None, None, :]
+    W_all[iop, q, I, J] = W_g
+    return W_all.sum(axis=0) / nops
+
+
 def symmetrize_ao_operator(symm, A):
     # Average an AO-index operator over all symmetry operations in the full BZ.
     A_avg = torch.zeros_like(A)

@@ -23,7 +23,7 @@ def get_W_error2_from_X(X, reg, ref_norm2_use, force_complex128=False):
         symm_use = symm128 if force_complex128 else symm
         perm_use = perm128 if force_complex128 else perm
         phase_use = phase128 if force_complex128 else phase
-        X_ao = libsymm.symmetrize_isdf_X(symm_use, X_ao, perm_use, phase_use)
+        X_ao = libsymm.symmetrize_isdf_X_fast(symm_use, X_ao, perm_use, phase_use)
     X_mo = optimize_X_common.X_mo_from_ao(X_ao, C, C128, force_complex128=force_complex128)
     Xo = X_mo[:, :, :nocc]
     Xv = X_mo[:, :, nocc:]
@@ -38,7 +38,7 @@ def get_W_error2_from_X(X, reg, ref_norm2_use, force_complex128=False):
         reg=reg,
     )
     if use_symm:
-        W = libsymm.symmetrize_isdf_W(symm_use, W, perm_use, phase_use)
+        W = libsymm.symmetrize_isdf_W_fast(symm_use, W, perm_use, phase_use)
     error2 = utils.thc_solve_w_error2_from_intermediate(W, L, rhs, ref_norm2_use)
     return W, error2
 
@@ -53,7 +53,7 @@ def get_abs_norm_loss(X, W, force_complex128=False):
             symm_use = symm128 if force_complex128 else symm
             perm_use = perm128 if force_complex128 else perm
             phase_use = phase128 if force_complex128 else phase
-            X_ao = libsymm.symmetrize_isdf_X(symm_use, X_ao, perm_use, phase_use)
+            X_ao = libsymm.symmetrize_isdf_X_fast(symm_use, X_ao, perm_use, phase_use)
         X_mo = optimize_X_common.X_mo_from_ao(X_ao, C, C128, force_complex128=force_complex128)
     Xo = X_mo[:, :, :nocc]
     Xv = X_mo[:, :, nocc:]
@@ -248,8 +248,8 @@ optimization_loss_args = (
 X_ao_opt = optimize_X_common.ao_from_state(X_opt.detach(), C, C128, state_AO)
 W_save = W_opt.detach()
 if use_symm:
-    X_symm = libsymm.symmetrize_isdf_X(symm, X_ao_opt, perm, phase)
-    W_symm = libsymm.symmetrize_isdf_W(symm, W_save, perm, phase)
+    X_symm = libsymm.symmetrize_isdf_X_fast(symm, X_ao_opt, perm, phase)
+    W_symm = libsymm.symmetrize_isdf_W_fast(symm, W_save, perm, phase)
     X_symm_err = torch.linalg.norm(X_symm - X_ao_opt) / torch.linalg.norm(X_ao_opt)
     W_symm_err = torch.linalg.norm(W_symm - W_save) / torch.linalg.norm(W_save)
 
