@@ -39,9 +39,9 @@ def get_W_error2_from_X(X, reg, ref_norm2_use, force_complex128=False):
         reg=reg,
     )
     if use_symm:
-        W = libsymm.symmetrize_isdf_W_fast(symm_use, W, perm_use, phase_use)
+        W = libsymm.symmetrize_isdf_W_fast(symm_use, W, perm, phase_use)
     if use_real:
-        W = optimize_X_common.symmetrize_real_gauge(W, negative_use)
+        W = optimize_X_common.symmetrize_real_gauge(W, negative)
     error2 = utils.thc_solve_w_error2_from_intermediate(W, L, rhs, ref_norm2_use)
     return W, error2
 
