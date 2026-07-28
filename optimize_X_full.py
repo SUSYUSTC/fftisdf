@@ -21,17 +21,13 @@ def get_W_error2_from_X(X, reg, ref_norm2_use, force_complex128=False):
     X_ref_use = X_ref128 if force_complex128 else X_ref
     W_ref_use = W_ref128 if force_complex128 else W_ref
     symm_use = symm128 if force_complex128 else symm
-    perm_use = perm128 if force_complex128 else perm
     phase_use = phase128 if force_complex128 else phase
 
-    if use_real:
-        negative_use = negative128 if force_complex128 else negative
-        X = optimize_X_common.symmetrize_real_gauge(X, negative_use)
     X_ao = optimize_X_common.ao_from_state(X, C, C128, state_AO, force_complex128=force_complex128)
     if use_symm:
-        X_ao = libsymm.symmetrize_isdf_X_fast(symm_use, X_ao, perm_use, phase_use)
+        X_ao = libsymm.symmetrize_isdf_X_fast(symm_use, X_ao, perm, phase_use)
     if use_real:
-        X_ao = optimize_X_common.symmetrize_real_gauge(X_ao, negative_use)
+        X_ao = optimize_X_common.symmetrize_real_gauge(X_ao, negative)
     if fit_AO:
         X_loss = X_ao
     else:
@@ -53,20 +49,16 @@ def get_W_error2_from_X(X, reg, ref_norm2_use, force_complex128=False):
 
 @utils.maybe_profile
 def get_abs_norm_loss(X, W, force_complex128=False):
-    if use_real:
-        negative_use = negative128 if force_complex128 else negative
-        X = optimize_X_common.symmetrize_real_gauge(X, negative_use)
-    if (not use_symm) and (not state_AO):
+    if (not use_symm) and (not use_real) and (not state_AO):
         X_mo = X
     else:
         X_ao = optimize_X_common.ao_from_state(X, C, C128, state_AO, force_complex128=force_complex128)
         if use_symm:
             symm_use = symm128 if force_complex128 else symm
-            perm_use = perm128 if force_complex128 else perm
             phase_use = phase128 if force_complex128 else phase
-            X_ao = libsymm.symmetrize_isdf_X_fast(symm_use, X_ao, perm_use, phase_use)
+            X_ao = libsymm.symmetrize_isdf_X_fast(symm_use, X_ao, perm, phase_use)
         if use_real:
-            X_ao = optimize_X_common.symmetrize_real_gauge(X_ao, negative_use)
+            X_ao = optimize_X_common.symmetrize_real_gauge(X_ao, negative)
         X_mo = optimize_X_common.X_mo_from_ao(X_ao, C, C128, force_complex128=force_complex128)
     norm_X = torch.linalg.svdvals(X_mo).max()
     W_R = utils.fourier_transform_3d(W, axis=0, kmesh=kmesh, inverse=False) / np.sqrt(nkpts).item()
@@ -199,15 +191,15 @@ if use_symm:
     symm = libsymm.PBCSymmetry(cell_isdf, kmesh, kpts, dtype=complex_dtype, device=device)
     perm, phase = libsymm.build_isdf_grid_transform(symm, coords, ix_sel, mesh=cell_isdf.mesh)
     symm128 = libsymm.PBCSymmetry(cell_isdf, kmesh, kpts, dtype=torch.complex128, device=device)
-    perm128, phase128 = libsymm.build_isdf_grid_transform(symm128, coords, ix_sel, mesh=cell_isdf.mesh)
+    _perm_check, phase128 = libsymm.build_isdf_grid_transform(symm128, coords, ix_sel, mesh=cell_isdf.mesh)
+    assert torch.all(_perm_check == perm)
 else:
     cell_isdf = None
     mesh = ix_sel = group_sel = None
     symm = perm = phase = None
-    symm128 = perm128 = phase128 = None
+    symm128 = phase128 = None
 
 negative = optimize_X_common.negative_k_indices(kmesh, device)
-negative128 = negative
 
 if fit_AO:
     X_ref = X_ref_ao
@@ -249,8 +241,6 @@ optimization_loss_args = (
 )
 
 X_save_state = X_opt.detach()
-if use_real:
-    X_save_state = optimize_X_common.symmetrize_real_gauge(X_save_state, negative)
 X_ao_opt = optimize_X_common.ao_from_state(X_save_state, C, C128, state_AO)
 W_save = W_opt.detach()
 if use_symm:
