@@ -36,33 +36,20 @@ def load_thc(chkfile, C):
     W = torch.from_numpy(W).to(device=device, dtype=complex_dtype)
     return X, W
 
+def build_Rov_thc_pairs(Xo, Xv, W, k1, k2, neg, kmesh, left=True):
+    q = utils.add_k(k2, neg[k1], kmesh).to(device=device)
+    P = torch.einsum("...Ii,...Ia->...Iia", Xo[k1].conj(), Xv[k2])
+    if left:
+        return torch.einsum("...IJ,...Iia->...Jia", W[q], P)
+    return P
 
 
-def build_Rov_thc(X, W, nocc, kmesh):
+def canonical_mp2_from_thc(X, W, mo_energy, nocc, kmesh, verbose=False):
     nkpts = X.shape[0]
     nvir = X.shape[-1] - nocc
-    nth = X.shape[1]
     o, v = get_part(nocc)
     Xo = X[:, :, o]
     Xv = X[:, :, v]
-    k = torch.arange(nkpts, device=device)
-    neg = utils.negative_k(k, kmesh).to(device=device)
-
-    Rleft = torch.empty((nkpts, nkpts, nth, nocc, nvir), dtype=complex_dtype, device=device)
-    Rright = torch.empty((nkpts, nkpts, nth, nocc, nvir), dtype=complex_dtype, device=device)
-    for k1 in range(nkpts):
-        for k2 in range(nkpts):
-            q = utils.add_k(k2, neg[k1], kmesh).item()
-            P = torch.einsum('Ii,Ia->Iia', Xo[k1].conj(), Xv[k2])
-            P = P.reshape((nth, nocc * nvir))
-            Rleft[k1, k2] = (P.T @ W[q]).T.reshape((nth, nocc, nvir))
-            Rright[k1, k2] = P.reshape((nth, nocc, nvir))
-    return Rleft, Rright
-
-
-def canonical_mp2_from_Rlr(Rleft, Rright, mo_energy, nocc, kmesh, verbose=False):
-    nkpts = Rleft.shape[0]
-    nvir = Rleft.shape[-1]
     k = torch.arange(nkpts, device=device)
     neg = utils.negative_k(k, kmesh).to(device=device)
     kq = utils.add_k(k[:, None], k[None, :], kmesh).to(device=device)
@@ -75,8 +62,8 @@ def canonical_mp2_from_Rlr(Rleft, Rright, mo_energy, nocc, kmesh, verbose=False)
         t0 = time.time()
         kp = kq[:, q]
         km = kq[:, neg[q]]
-        Ria = Rleft[k, kp]
-        Rjb = Rright[k, km]
+        Ria = build_Rov_thc_pairs(Xo, Xv, W, k, kp, neg, kmesh, left=True)
+        Rjb = build_Rov_thc_pairs(Xo, Xv, W, k, km, neg, kmesh, left=False)
         G = torch.einsum('kxia,lxjb->kliajb', Ria, Rjb) / nkpts
         denom = (
             eocc[:, None, :, None, None, None]
@@ -89,8 +76,10 @@ def canonical_mp2_from_Rlr(Rleft, Rright, mo_energy, nocc, kmesh, verbose=False)
         exchange = torch.tensor(0.0, dtype=real_dtype, device=device)
         for ik in range(nkpts):
             ka = kp[ik]
-            Rib = Rleft[ik, km]
-            Rja = Rright[k, ka]
+            k1 = torch.full((nkpts,), ik, dtype=torch.long, device=device)
+            k2 = torch.full((nkpts,), ka, dtype=torch.long, device=device)
+            Rib = build_Rov_thc_pairs(Xo, Xv, W, k1, km, neg, kmesh, left=True)
+            Rja = build_Rov_thc_pairs(Xo, Xv, W, k, k2, neg, kmesh, left=False)
             H = torch.einsum('lxib,lxja->lijba', Rib, Rja) / nkpts
             exchange -= torch.einsum('liajb,lijba->', T[ik], H).real
         emp2 += 2.0 * direct + exchange
@@ -162,9 +151,8 @@ print("load THC time", time.time() - t0)
 print("nth", X.shape[1])
 
 t0 = time.time()
-Rleft, Rright = build_Rov_thc(X, W, nocc, kmesh)
-print("build THC-R time", time.time() - t0)
-emp2_custom = canonical_mp2_from_Rlr(Rleft, Rright, mo_energy, nocc, kmesh, verbose=args.verbose)
+emp2_custom = canonical_mp2_from_thc(X, W, mo_energy, nocc, kmesh, verbose=args.verbose)
+print("MP2 contraction time", time.time() - t0)
 print("custom THC MP2 energy = %.16e" % emp2_custom.detach().cpu().numpy())
 
 if args.exact:
