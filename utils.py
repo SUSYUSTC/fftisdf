@@ -487,6 +487,20 @@ def lrdf_ov_inner_from_mo(D_A, G_A, D_B, G_B, kmesh, by_q=False):
 
 
 @maybe_profile
+def lrdf_df_ov_inner_from_mo(D, G, R, kmesh, by_q=False):
+    nkpts, _, nocc, nvir = D.shape
+    Dmat = D.permute(0, 2, 3, 1).reshape(nkpts * nocc * nvir, -1)
+    result = torch.empty((nkpts,), dtype=G.dtype, device=G.device)
+    for q in range(nkpts):
+        Rq = R[:, q].permute(0, 2, 3, 1).reshape(nkpts * nocc * nvir, -1)
+        A = torch.einsum("pr,px->rx", Dmat, Rq.conj())
+        result[q] = torch.einsum("rs,rx,sx->", G[q].conj(), A, A.conj())
+    if by_q:
+        return result
+    return result.sum()
+
+
+@maybe_profile
 def thc_thclrdf_ov_solve_w_intermediate_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, D, G, kmesh, reg=None):
     L = thc_ovvo_build_Lbar(Xo, Xv, Xo, Xv, kmesh)
     L_ref = thc_ovvo_build_Lbar(Xo_ref, Xv_ref, Xo, Xv, kmesh)
