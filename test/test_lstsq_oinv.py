@@ -50,6 +50,8 @@ ref_norm2 = utils.thc_ovvo_inner_from_mo(
 print()
 print("reg scan")
 print("  reg                 rel_error              ||W||")
+rel_errors = []
+w_norms = []
 for reg in [None, 1e-8, 1e-4, 1e-2, 1e-1, 1.0, 10.0, 100.0, 1000.0]:
     W = []
     for s in range(nkpts):
@@ -63,5 +65,16 @@ for reg in [None, 1e-8, 1e-4, 1e-2, 1e-1, 1.0, 10.0, 100.0, 1000.0]:
     )
     rel_error = torch.sqrt(error2 / ref_norm2)
     w_norm = torch.linalg.norm(W)
+    rel_errors.append(rel_error)
+    w_norms.append(w_norm)
     reg_label = "None" if reg is None else f"{reg:.1e}"
     print(f"  {reg_label:>8s}   {rel_error.item():.16e}   {w_norm.item():.16e}")
+
+
+def test_lstsq_oinv_matches_svd():
+    assert diff / norm < 1e-10
+
+
+def test_regularization_reduces_middle_norm():
+    assert all(w_norms[i + 1] <= w_norms[i] for i in range(len(w_norms) - 1))
+    assert rel_errors[-1] > rel_errors[0]

@@ -112,6 +112,7 @@ print("L_ijq shape =", L_ijq_B.shape)
 print("")
 print("Block norm check")
 norms_A, block_norms_A = lib_qtt.mpo_borrow_block_norm(A, return_blocks=True)
+norm_errors = []
 for isite in range(nsite):
     nA = norms_A[isite]
     blocks_A = block_norms_A[isite]
@@ -122,6 +123,7 @@ for isite in range(nsite):
     print("  max from A    =", nA)
     print("  max from B    =", nB)
     print("  diff          =", abs(nA - nB))
+    norm_errors.append(abs(nA - nB))
 
 diff = L_ijq_B - L_ijq_direct
 print("max |B - direct| =", np.abs(diff).max())
@@ -138,3 +140,11 @@ for i in range(N):
                 assert n < 1e-12
 
 print("All wrong-q blocks are zero.")
+
+
+def test_carry_mpo_block_norms():
+    assert max(norm_errors) < 1e-12
+
+
+def test_carry_mpo_matches_dense_tensor():
+    assert np.abs(diff).max() < 1e-12

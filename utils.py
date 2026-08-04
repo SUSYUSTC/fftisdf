@@ -452,6 +452,80 @@ def thc_ovvo_inner_from_mo(Xo_A, Xv_A, W_A, Xo_B, Xv_B, W_B, kmesh, by_q=False):
 
 
 @maybe_profile
+def thc_lrdf_ov_build_Lbar(Xo, Xv, D, kmesh):
+    """Build the mixed Gram tensor for THC pair factors and D[k,r,i,a]."""
+    nkpts = int(np.prod(kmesh))
+    sqrt_nkpts = np.sqrt(nkpts).item()
+    assert Xo.shape[0] == Xv.shape[0] == D.shape[0] == nkpts
+
+    A = torch.einsum("kIi,kria->kIra", Xo, D.conj())
+    A_fft = fourier_transform_3d(A, axis=0, kmesh=kmesh, inverse=False)
+    Xv_fft = fourier_transform_3d(Xv.conj(), axis=0, kmesh=kmesh, inverse=False)
+
+    negative = negative_k(torch.arange(nkpts, device=Xo.device), kmesh)
+    Lbar_fft = torch.einsum("qIra,qIa->qIr", A_fft[negative], Xv_fft)
+    Lbar = fourier_transform_3d(Lbar_fft, axis=0, kmesh=kmesh, inverse=True)
+    return Lbar * sqrt_nkpts
+
+
+@maybe_profile
+def thc_lrdf_ov_inner_from_mo(Xo, Xv, W, D, G, kmesh, by_q=False):
+    Lbar = thc_lrdf_ov_build_Lbar(Xo, Xv, D, kmesh)
+    return thc_inner_from_L(W, Lbar, G, by_q=by_q)
+
+
+@maybe_profile
+def lrdf_ov_build_Lbar(D_A, D_B, kmesh):
+    assert D_A.shape[0] == D_B.shape[0] == int(np.prod(kmesh))
+    return torch.einsum("kria,ksia->rs", D_A, D_B.conj())
+
+
+@maybe_profile
+def lrdf_ov_inner_from_mo(D_A, G_A, D_B, G_B, kmesh, by_q=False):
+    Lbar = lrdf_ov_build_Lbar(D_A, D_B, kmesh)
+    return thc_inner_from_L(G_A, Lbar, G_B, by_q=by_q)
+
+
+@maybe_profile
+def thc_thclrdf_ov_solve_w_intermediate_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, D, G, kmesh, reg=None):
+    L = thc_ovvo_build_Lbar(Xo, Xv, Xo, Xv, kmesh)
+    L_ref = thc_ovvo_build_Lbar(Xo_ref, Xv_ref, Xo, Xv, kmesh)
+    rhs_W = L_ref.conj().transpose(-1, -2) @ W_ref @ L_ref
+
+    C_mix = thc_lrdf_ov_build_Lbar(Xo, Xv, D, kmesh)
+    L_D = lrdf_ov_build_Lbar(D, D, kmesh)
+    C_ref = thc_lrdf_ov_build_Lbar(Xo_ref, Xv_ref, D, kmesh)
+    rhs_G = C_ref.conj().transpose(-1, -2) @ W_ref @ C_ref
+
+    rhs_W_res = rhs_W - C_mix @ G @ C_mix.conj().transpose(-1, -2)
+    W = torch_lstsq_oinv_PSD(L, rhs_W_res, reg=reg)
+    W = (W + W.conj().transpose(-1, -2)) / 2.0
+    return W, L, rhs_W, L_D, C_mix, rhs_G
+
+
+@maybe_profile
+def thc_thclrdf_ov_solve_w_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, D, G, kmesh, reg=None):
+    W, L, rhs_W, L_D, C_mix, rhs_G = thc_thclrdf_ov_solve_w_intermediate_from_mo(
+        Xo_ref, Xv_ref, W_ref, Xo, Xv, D, G, kmesh, reg=reg,
+    )
+    return W
+
+
+@maybe_profile
+def thc_thclrdf_ov_solve_w_error2_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, D, G, kmesh, ref_norm2, reg=None):
+    W, L, rhs_W, L_D, C_mix, rhs_G = thc_thclrdf_ov_solve_w_intermediate_from_mo(
+        Xo_ref, Xv_ref, W_ref, Xo, Xv, D, G, kmesh, reg=reg,
+    )
+    norm2_thc = thc_inner_from_L(W, L, W).real
+    norm2_lrdf = thc_inner_from_L(G, L_D, G).real
+    cross_thc_lrdf = thc_inner_from_L(W, C_mix, G).real
+    cross_ref_thc = (W.conj().transpose(-1, -2) @ rhs_W).diagonal(dim1=-1, dim2=-2).sum().real
+    cross_ref_lrdf = (G.conj().transpose(-1, -2) @ rhs_G).diagonal(dim1=-1, dim2=-2).sum().real
+    error2 = ref_norm2 + norm2_thc + norm2_lrdf + 2.0 * cross_thc_lrdf - 2.0 * cross_ref_thc - 2.0 * cross_ref_lrdf
+    return W, error2
+
+
+@maybe_profile
 def thc_ovvo_error2_from_mo(Xo_A, Xv_A, W_A, Xo_B, Xv_B, W_B, kmesh, by_q=False):
     aa = thc_ovvo_inner_from_mo(Xo_A, Xv_A, W_A, Xo_A, Xv_A, W_A, kmesh, by_q=by_q)
     bb = thc_ovvo_inner_from_mo(Xo_B, Xv_B, W_B, Xo_B, Xv_B, W_B, kmesh, by_q=by_q)
