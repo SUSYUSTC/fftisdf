@@ -36,20 +36,32 @@ def load_thc(chkfile, C):
     W = torch.from_numpy(W).to(device=device, dtype=complex_dtype)
     return X, W
 
-def build_Rov_thc_pairs(Xo, Xv, W, k1, k2, neg, kmesh, left=True):
-    q = utils.add_k(k2, neg[k1], kmesh).to(device=device)
-    P = torch.einsum("...Ii,...Ia->...Iia", Xo[k1].conj(), Xv[k2])
-    if left:
-        return torch.einsum("...IJ,...Iia->...Jia", W[q], P)
-    return P
+def build_Pov_thc(Xo, Xv, k1, k2):
+    return torch.einsum("...Ii,...Ia->...Iia", Xo[k1].conj(), Xv[k2])
 
 
-def canonical_mp2_from_thc(X, W, mo_energy, nocc, kmesh, verbose=False):
+def build_Rov_thc(X, W, nocc, kmesh):
     nkpts = X.shape[0]
     nvir = X.shape[-1] - nocc
+    nth = X.shape[1]
     o, v = get_part(nocc)
     Xo = X[:, :, o]
     Xv = X[:, :, v]
+    k = torch.arange(nkpts, device=device)
+    neg = utils.negative_k(k, kmesh).to(device=device)
+
+    R = torch.empty((nkpts, nkpts, nth, nocc, nvir), dtype=complex_dtype, device=device)
+    for k1 in range(nkpts):
+        for k2 in range(nkpts):
+            q = utils.add_k(k2, neg[k1], kmesh).item()
+            P = build_Pov_thc(Xo, Xv, k1, k2).reshape((nth, nocc * nvir))
+            R[k1, k2] = (P.T @ W[q]).T.reshape((nth, nocc, nvir))
+    return R, Xo, Xv
+
+
+def canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=False):
+    nkpts = R.shape[0]
+    nvir = R.shape[-1]
     k = torch.arange(nkpts, device=device)
     neg = utils.negative_k(k, kmesh).to(device=device)
     kq = utils.add_k(k[:, None], k[None, :], kmesh).to(device=device)
@@ -62,9 +74,9 @@ def canonical_mp2_from_thc(X, W, mo_energy, nocc, kmesh, verbose=False):
         t0 = time.time()
         kp = kq[:, q]
         km = kq[:, neg[q]]
-        Ria = build_Rov_thc_pairs(Xo, Xv, W, k, kp, neg, kmesh, left=True)
-        Rjb = build_Rov_thc_pairs(Xo, Xv, W, k, km, neg, kmesh, left=False)
-        G = torch.einsum('kxia,lxjb->kliajb', Ria, Rjb) / nkpts
+        Ria = R[k, kp]
+        Pjb = build_Pov_thc(Xo, Xv, k, km)
+        G = torch.einsum('kxia,lxjb->kliajb', Ria, Pjb) / nkpts
         denom = (
             eocc[:, None, :, None, None, None]
             - evir[kp][:, None, None, :, None, None]
@@ -76,19 +88,26 @@ def canonical_mp2_from_thc(X, W, mo_energy, nocc, kmesh, verbose=False):
         exchange = torch.tensor(0.0, dtype=real_dtype, device=device)
         for ik in range(nkpts):
             ka = kp[ik]
-            k1 = torch.full((nkpts,), ik, dtype=torch.long, device=device)
+            Rib = R[ik, km]
             k2 = torch.full((nkpts,), ka, dtype=torch.long, device=device)
-            Rib = build_Rov_thc_pairs(Xo, Xv, W, k1, km, neg, kmesh, left=True)
-            Rja = build_Rov_thc_pairs(Xo, Xv, W, k, k2, neg, kmesh, left=False)
-            H = torch.einsum('lxib,lxja->lijba', Rib, Rja) / nkpts
+            Pja = build_Pov_thc(Xo, Xv, k, k2)
+            H = torch.einsum('lxib,lxja->lijba', Rib, Pja) / nkpts
             exchange -= torch.einsum('liajb,lijba->', T[ik], H).real
         emp2 += 2.0 * direct + exchange
         if verbose:
             print('q %3d  direct %.12e  exchange %.12e  time %.4f' % (
-            q, direct.item(), exchange.item(), time.time() - t0,
+                q, direct.item(), exchange.item(), time.time() - t0,
             ), flush=True)
     emp2 /= nkpts
     return emp2
+
+
+def canonical_mp2_from_thc(X, W, mo_energy, nocc, kmesh, verbose=False):
+    R, Xo, Xv = build_Rov_thc(X, W, nocc, kmesh)
+    print("R memory GB", R.numel() * R.element_size() / 1024**3)
+    return canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=verbose)
+
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument("system")
