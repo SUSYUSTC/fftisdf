@@ -2,7 +2,6 @@
 __pycache__/
 *.py[cod]
 .DS_Store
-*chk
 
 # C extensions
 *.so
