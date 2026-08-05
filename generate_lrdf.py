@@ -10,34 +10,29 @@ import system_common
 import utils
 
 
-def get_pair_matrix(R, q):
-    nkpts, _, naux, nocc, nvir = R.shape
-    return R[:, q].permute(0, 2, 3, 1).reshape(nkpts * nocc * nvir, naux)
-
-
-def apply_reference(Rq, Z):
-    t = torch.einsum("px,pr->xr", Rq, Z)
-    return torch.einsum("px,xr->pr", Rq.conj(), t)
-
-
 def get_svd_initial(R, rank):
-    nkpts, _, _, nocc, nvir = R.shape
+    nkpts, _, naux, nocc, nvir = R.shape
     npair = nkpts * nocc * nvir
-    H = torch.zeros((npair, npair), dtype=R.dtype, device=R.device)
-    for q in range(nkpts):
-        Rq = get_pair_matrix(R, q)
-        V = torch.einsum("px,tx->pt", Rq.conj(), Rq)
-        H += torch.einsum("pr,tr->pt", V, V.conj())
-    eigvals, U = torch.linalg.eigh(H)
-    idx = torch.arange(npair - 1, npair - rank - 1, -1, device=R.device)
-    singular_values = torch.sqrt(torch.clamp(eigvals[idx], min=0.0))
-    U = U[:, idx]
+
+    Rq = torch.einsum("kqxia->qkiax", R).reshape(nkpts, npair, naux)
+    M = torch.einsum("qpx,qpy->qxy", Rq, Rq.conj())
+    eigvals, eigvecs = torch.linalg.eigh(M)
+    M_sqrt = torch.einsum(
+        "qxi,qi,qyi->qxy",
+        eigvecs,
+        torch.sqrt(torch.clamp(eigvals, min=0.0)),
+        eigvecs.conj(),
+    )
+    B = torch.einsum("qpx,qxy->qpy", Rq.conj(), M_sqrt)
+    B = torch.einsum("qpy->pqy", B).reshape(npair, nkpts * naux)
+
+    U, singular_values, _ = torch.linalg.svd(B, full_matrices=False)
+    U = U[:, :rank]
+    singular_values = singular_values[:rank]
 
     D = U.conj().reshape(nkpts, nocc, nvir, rank).permute(0, 3, 1, 2)
-    G = torch.empty((nkpts, rank, rank), dtype=R.dtype, device=R.device)
-    for q in range(nkpts):
-        VU = apply_reference(get_pair_matrix(R, q), U)
-        G[q] = torch.einsum("pr,ps->rs", U.conj(), VU)
+    F = torch.einsum("qpx,pr->qxr", Rq, U)
+    G = torch.einsum("qxr,qxs->qrs", F.conj(), F)
     return D, G, singular_values
 
 
@@ -50,9 +45,12 @@ parser.add_argument("kz", type=int)
 parser.add_argument("basis")
 parser.add_argument("-suffix", default=None)
 parser.add_argument("-cuda", type=int, default=None)
+parser.add_argument("--cpu", action="store_true")
 args = parser.parse_args()
 
-if args.cuda is None:
+if args.cpu:
+    device = torch.device("cpu")
+elif args.cuda is None:
     device, gpu_reserve_tensor = optimize_X_common.get_device()
 else:
     device = torch.device(f"cuda:{args.cuda}")
@@ -77,10 +75,11 @@ kpts_int = np.round(mf.cell.get_scaled_kpts(kpts) * kmesh).astype(int) % kmesh
 assert utils.is_k_ordered(kpts_int, kmesh)
 
 wannier = np.load(wannier_path, allow_pickle=True).item()
+assert wannier["layout"] == "k2q"
 Cocc = np.asarray(wannier["occ"])
-Cvir = np.asarray(wannier["vir"])
+Cvir = np.asarray(mf.mo_coeff)[:, :, Cocc.shape[-1]:]
 R = utils.get_gdf_tensor_compact(
-    mf.with_df, kpts_int, kmesh, Cocc, Cvir, layout="k1q",
+    mf.with_df, kpts_int, kmesh, Cocc, Cvir, layout="k2q",
 )
 R = torch.from_numpy(R).to(device=device, dtype=complex_dtype)
 
@@ -108,7 +107,7 @@ D, G, singular_values = get_svd_initial(R, rank)
 ref_norm2 = utils.df_inner_from_mo(R, kmesh).real
 lrdf_norm2 = utils.lrdf_ov_inner_from_mo(D, G, D, G, kmesh).real
 cross = utils.lrdf_df_ov_inner_from_mo(D, G, R, kmesh).real
-error2 = ref_norm2 + lrdf_norm2 - 2.0 * cross
+error2 = torch.clamp(ref_norm2 + lrdf_norm2 - 2.0 * cross, min=0.0)
 rel_error = torch.sqrt(error2 / ref_norm2)
 
 print("")
@@ -125,7 +124,8 @@ data = {
     "naux": naux,
     "rank": rank,
     "reference": "GDF",
-    "orbital_basis": "pywannier",
+    "orbital_basis": "pywannier_occ_canonical_vir",
+    "layout": "k2q",
     "singular_values": singular_values.detach().cpu(),
 }
 torch.save(data, save_path)

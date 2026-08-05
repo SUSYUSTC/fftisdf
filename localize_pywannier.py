@@ -1,6 +1,8 @@
 import argparse
+import inspect
 import os
 import pickle
+import textwrap
 import types
 import numpy as np
 import pyscf.pbc.tools.pywannier90 as pywannier90
@@ -20,11 +22,29 @@ def make_kmf_part(mf, p0, p1):
     return kmf
 
 
-def run_w90_part(mf, kmesh, p0, p1, name):
+def fix_projection_evaluator():
+    # PySCF uses scalar Boolean operators on array masks in g_r.
+    src = textwrap.dedent(inspect.getsource(pywannier90.g_r))
+    src = src.replace(
+        "neither_idx = not larger_idx and not smaller_idx",
+        "neither_idx = ~larger_idx & ~smaller_idx",
+    )
+    namespace = dict(pywannier90.__dict__)
+    exec(src, namespace)
+    pywannier90.g_r = namespace["g_r"]
+
+
+def run_w90_part(mf, kmesh, p0, p1, name, projections=None):
     num_wann = p1 - p0
     kmf = make_kmf_part(mf, p0, p1)
-    w90 = pywannier90.W90(kmf, mf.cell, kmesh, num_wann)
-    w90.use_bloch_phases = True
+    keywords = None
+    if projections is not None:
+        fix_projection_evaluator()
+        keywords = "begin projections\n" + "\n".join(projections) + "\nend projections\n"
+    w90 = pywannier90.W90(
+        kmf, mf.cell, kmesh, num_wann, other_keywords=keywords,
+    )
+    w90.use_bloch_phases = projections is None
 
     print("")
     print(f"pyWannier90 {name}")
@@ -75,6 +95,9 @@ save_path = os.path.join(data_dir, f"Clocal_pywannier_{klabel}.npy")
 with open(dft_pkl, "rb") as f:
     mf = pickle.load(f)
 
+projections = system_common.load_section_setting(
+    system, basis, "wannier", "occ_projections", suffix=suffix,
+)
 os.chdir(data_dir)
 
 cell = mf.cell
@@ -91,9 +114,10 @@ print(f"suffix = {suffix}")
 print(f"data_dir = {data_dir}")
 print(f"nao = {cell.nao_nr()}, nmo = {nmo}, nocc = {nocc}, nvir = {nmo - nocc}")
 print(f"nocc by k = {nocc_all}")
+print(f"occupied projections = {projections}")
 
-C_occ = run_w90_part(mf, kmesh, 0, nocc, "occ")
-C_vir = run_w90_part(mf, kmesh, nocc, nmo, "vir")
+C_occ = run_w90_part(mf, kmesh, 0, nocc, "occ", projections=projections)
+C_vir = C[:, :, nocc:]
 
 print("")
 check_s_orthonormal(cell, mf.kpts, C_occ, "occ")
@@ -102,6 +126,7 @@ check_s_orthonormal(cell, mf.kpts, C_vir, "vir")
 data = {
     "occ": C_occ,
     "vir": C_vir,
+    "layout": "k2q",
 }
 np.save(save_path, data)
 print("")

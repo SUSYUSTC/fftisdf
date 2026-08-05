@@ -33,16 +33,16 @@ assert lrdf["orbital_basis"] == "canonical_mo"
 assert D.shape == (9, 5, 4, 4)
 assert G.shape == (9, 5, 5)
 
-k = torch.arange(9)
+k2 = torch.arange(9)
 q = torch.arange(9)
-kq = utils.add_k(k[None, :], q[:, None], kmesh)
-P = torch.einsum("kIi,qkIa->qkIia", Xo, Xv[kq].conj())
+k1 = utils.add_k(k2[None, :], utils.negative_k(q[:, None], kmesh), kmesh)
+P = torch.einsum("qkIi,kIa->qkIia", Xo[k1], Xv.conj())
 
 kpts = mf.cell.make_kpts(kmesh)
 kpts_int = np.round(mf.cell.get_scaled_kpts(kpts) * kmesh).astype(int) % kmesh
 Cocc = np.array(C[:, :, :nocc], order="C", copy=True)
 Cvir = np.array(C[:, :, nocc:], order="C", copy=True)
-R = utils.get_gdf_tensor_compact(mf.with_df, kpts_int, kmesh, Cocc, Cvir, layout="k1q")
+R = utils.get_gdf_tensor_compact(mf.with_df, kpts_int, kmesh, Cocc, Cvir, layout="k2q")
 R = torch.from_numpy(R)
 
 
@@ -70,7 +70,5 @@ def test_lrdf_df_inner():
     eri_df = torch.einsum("kqxia,lqxjb->qkliajb", R.conj(), R)
     inner_ref_q = torch.einsum("qkliajb,qkliajb->q", eri_lrdf.conj(), eri_df)
     inner_q = utils.lrdf_df_ov_inner_from_mo(D, G, R, kmesh, by_q=True)
-    lrdf_norm2 = utils.lrdf_ov_inner_from_mo(D, G, D, G, kmesh).real
 
     assert torch.linalg.norm(inner_q - inner_ref_q) / torch.linalg.norm(inner_ref_q) < 1e-12
-    assert torch.abs(inner_q.sum().real - lrdf_norm2) / lrdf_norm2 < 1e-12

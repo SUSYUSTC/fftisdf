@@ -453,17 +453,17 @@ def thc_ovvo_inner_from_mo(Xo_A, Xv_A, W_A, Xo_B, Xv_B, W_B, kmesh, by_q=False):
 
 @maybe_profile
 def thc_lrdf_ov_build_Lbar(Xo, Xv, D, kmesh):
-    """Build the mixed Gram tensor for THC pair factors and D[k,r,i,a]."""
+    """Build the mixed Gram tensor for k2q LRDF factors D[k2,r,i,a]."""
     nkpts = int(np.prod(kmesh))
     sqrt_nkpts = np.sqrt(nkpts).item()
     assert Xo.shape[0] == Xv.shape[0] == D.shape[0] == nkpts
 
-    A = torch.einsum("kIi,kria->kIra", Xo, D.conj())
+    A = torch.einsum("kIa,kria->kIri", Xv.conj(), D.conj())
     A_fft = fourier_transform_3d(A, axis=0, kmesh=kmesh, inverse=False)
-    Xv_fft = fourier_transform_3d(Xv.conj(), axis=0, kmesh=kmesh, inverse=False)
+    Xo_fft = fourier_transform_3d(Xo, axis=0, kmesh=kmesh, inverse=False)
 
     negative = negative_k(torch.arange(nkpts, device=Xo.device), kmesh)
-    Lbar_fft = torch.einsum("qIra,qIa->qIr", A_fft[negative], Xv_fft)
+    Lbar_fft = torch.einsum("qIri,qIi->qIr", A_fft, Xo_fft[negative])
     Lbar = fourier_transform_3d(Lbar_fft, axis=0, kmesh=kmesh, inverse=True)
     return Lbar * sqrt_nkpts
 
