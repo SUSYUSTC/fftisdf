@@ -61,9 +61,15 @@ def get_abs_norm_loss(X, W, force_complex128=False):
         X_mo = optimize_X_common.X_mo_from_ao(X_ao, C, C128, force_complex128=force_complex128)
     Xo = X_mo[:, :, :nocc]
     Xv = X_mo[:, :, nocc:]
-    norm_Xo = torch.linalg.svdvals(Xo).max()
-    norm_Xv = torch.linalg.svdvals(Xv).max()
-    if use_Fnorm:
+    if Xo_colnorm:
+        norm_Xo = torch.linalg.norm(Xo, dim=2).max()
+    else:
+        norm_Xo = torch.linalg.svdvals(Xo).max()
+    if Xv_colnorm:
+        norm_Xv = torch.linalg.norm(Xv, dim=2).max()
+    else:
+        norm_Xv = torch.linalg.svdvals(Xv).max()
+    if W_Fnorm:
         norm_W = torch.linalg.norm(W, dim=(1, 2)).max() / nkpts
     else:
         norm_W = torch.linalg.eigvalsh(W).abs().max() / nkpts
@@ -124,7 +130,9 @@ parser.add_argument("-power", type=int, default=0)
 parser.add_argument("-suffix", default=None)
 parser.add_argument("-device", type=int)
 parser.add_argument("-init_reg", type=float, default=1e-2)
-parser.add_argument("--use_Fnorm", action="store_true")
+parser.add_argument("--Xo_colnorm", action="store_true")
+parser.add_argument("--Xv_colnorm", action="store_true")
+parser.add_argument("--W_Fnorm", action="store_true")
 parser.add_argument("--screen", action="store_true")
 parser.add_argument("--save", action="store_true")
 parser.add_argument("--symm", action="store_true")
@@ -157,7 +165,9 @@ use_symm = args.symm
 symm_tag = "_symm" if use_symm else ""
 use_real = args.real
 real_tag = "_real" if use_real else ""
-use_Fnorm = args.use_Fnorm
+Xo_colnorm = args.Xo_colnorm
+Xv_colnorm = args.Xv_colnorm
+W_Fnorm = args.W_Fnorm
 init_reg = args.init_reg
 
 data_dir = system_common.get_data_dir(system, basis, suffix=suffix)

@@ -47,7 +47,7 @@ R = torch.from_numpy(R)
 
 
 def test_thc_lrdf_inner():
-    eri_thc = torch.einsum("qkIia,qIJ,qlJjb->qkliajb", P.conj(), W, P)
+    eri_thc = torch.einsum("qlIjb,qIJ,qkJia->qkliajb", P.conj(), W, P)
     eri_lrdf = torch.einsum("kria,qrs,lsjb->qkliajb", D.conj(), G, D)
     inner_ref_q = torch.einsum("qkliajb,qkliajb->q", eri_thc.conj(), eri_lrdf)
     inner_q = utils.thc_lrdf_ov_inner_from_mo(Xo, Xv, W, D, G, kmesh, by_q=True)

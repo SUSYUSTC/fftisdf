@@ -458,7 +458,7 @@ def thc_lrdf_ov_build_Lbar(Xo, Xv, D, kmesh):
     sqrt_nkpts = np.sqrt(nkpts).item()
     assert Xo.shape[0] == Xv.shape[0] == D.shape[0] == nkpts
 
-    A = torch.einsum("kIa,kria->kIri", Xv.conj(), D.conj())
+    A = torch.einsum("kIa,kria->kIri", Xv.conj(), D)
     A_fft = fourier_transform_3d(A, axis=0, kmesh=kmesh, inverse=False)
     Xo_fft = fourier_transform_3d(Xo, axis=0, kmesh=kmesh, inverse=False)
 
@@ -471,7 +471,7 @@ def thc_lrdf_ov_build_Lbar(Xo, Xv, D, kmesh):
 @maybe_profile
 def thc_lrdf_ov_inner_from_mo(Xo, Xv, W, D, G, kmesh, by_q=False):
     Lbar = thc_lrdf_ov_build_Lbar(Xo, Xv, D, kmesh)
-    return thc_inner_from_L(W, Lbar, G, by_q=by_q)
+    return thc_inner_from_L(W, Lbar, G.conj(), by_q=by_q)
 
 
 @maybe_profile
@@ -509,17 +509,15 @@ def thc_thclrdf_ov_solve_w_intermediate_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, D
     C_mix = thc_lrdf_ov_build_Lbar(Xo, Xv, D, kmesh)
     L_D = lrdf_ov_build_Lbar(D, D, kmesh)
     C_ref = thc_lrdf_ov_build_Lbar(Xo_ref, Xv_ref, D, kmesh)
-    rhs_G = C_ref.conj().transpose(-1, -2) @ W_ref @ C_ref
-
-    rhs_W_res = rhs_W - C_mix @ G @ C_mix.conj().transpose(-1, -2)
+    rhs_W_res = rhs_W - C_mix @ G.conj() @ C_mix.conj().transpose(-1, -2)
     W = torch_lstsq_oinv_PSD(L, rhs_W_res, reg=reg)
     W = (W + W.conj().transpose(-1, -2)) / 2.0
-    return W, L, rhs_W, L_D, C_mix, rhs_G
+    return W, L, rhs_W, L_D, C_mix, C_ref
 
 
 @maybe_profile
 def thc_thclrdf_ov_solve_w_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, D, G, kmesh, reg=None):
-    W, L, rhs_W, L_D, C_mix, rhs_G = thc_thclrdf_ov_solve_w_intermediate_from_mo(
+    W, _, _, _, _, _ = thc_thclrdf_ov_solve_w_intermediate_from_mo(
         Xo_ref, Xv_ref, W_ref, Xo, Xv, D, G, kmesh, reg=reg,
     )
     return W
@@ -527,14 +525,14 @@ def thc_thclrdf_ov_solve_w_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, D, G, kmesh, r
 
 @maybe_profile
 def thc_thclrdf_ov_solve_w_error2_from_mo(Xo_ref, Xv_ref, W_ref, Xo, Xv, D, G, kmesh, ref_norm2, reg=None):
-    W, L, rhs_W, L_D, C_mix, rhs_G = thc_thclrdf_ov_solve_w_intermediate_from_mo(
+    W, L, rhs_W, L_D, C_mix, C_ref = thc_thclrdf_ov_solve_w_intermediate_from_mo(
         Xo_ref, Xv_ref, W_ref, Xo, Xv, D, G, kmesh, reg=reg,
     )
     norm2_thc = thc_inner_from_L(W, L, W).real
     norm2_lrdf = thc_inner_from_L(G, L_D, G).real
-    cross_thc_lrdf = thc_inner_from_L(W, C_mix, G).real
+    cross_thc_lrdf = thc_inner_from_L(W, C_mix, G.conj()).real
     cross_ref_thc = (W.conj().transpose(-1, -2) @ rhs_W).diagonal(dim1=-1, dim2=-2).sum().real
-    cross_ref_lrdf = (G.conj().transpose(-1, -2) @ rhs_G).diagonal(dim1=-1, dim2=-2).sum().real
+    cross_ref_lrdf = thc_inner_from_L(W_ref, C_ref, G.conj()).real
     error2 = ref_norm2 + norm2_thc + norm2_lrdf + 2.0 * cross_thc_lrdf - 2.0 * cross_ref_thc - 2.0 * cross_ref_lrdf
     return W, error2
 

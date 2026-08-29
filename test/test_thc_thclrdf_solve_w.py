@@ -38,7 +38,7 @@ kq = utils.add_k(k[None, :], q[:, None], kmesh)
 
 def test_thc_thclrdf_solve_w_error2():
     P_ref = torch.einsum("kIi,qkIa->qkIia", Xo_ref, Xv_ref[kq].conj())
-    eri_ref = torch.einsum("qkIia,qIJ,qlJjb->qkliajb", P_ref.conj(), W_ref, P_ref)
+    eri_ref = torch.einsum("qlIjb,qIJ,qkJia->qkliajb", P_ref.conj(), W_ref, P_ref)
     ref_norm2 = torch.linalg.norm(eri_ref)**2
 
     W, error2 = utils.thc_thclrdf_ov_solve_w_error2_from_mo(
@@ -48,8 +48,8 @@ def test_thc_thclrdf_solve_w_error2():
     )
 
     P = torch.einsum("kIi,qkIa->qkIia", Xo, Xv[kq].conj())
-    eri_thc = torch.einsum("qkIia,qIJ,qlJjb->qkliajb", P.conj(), W, P)
-    eri_lrdf = torch.einsum("kria,qrs,lsjb->qkliajb", D.conj(), G, D)
+    eri_thc = torch.einsum("qlIjb,qIJ,qkJia->qkliajb", P.conj(), W, P)
+    eri_lrdf = torch.einsum("qkria,qrs,qlsjb->qkliajb", D[kq].conj(), G, D[kq])
     error2_ref = torch.linalg.norm(eri_ref - eri_thc - eri_lrdf)**2
 
     assert torch.abs(error2 - error2_ref) / error2_ref < 1e-12
