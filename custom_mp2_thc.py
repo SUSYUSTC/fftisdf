@@ -40,6 +40,27 @@ def build_Pov_thc(Xo, Xv, k1, k2):
     return torch.einsum("...Ii,...Ia->...Iia", Xo[k1].conj(), Xv[k2])
 
 
+def build_Pvo_thc(Xo, Xv, k1, k2):
+    return torch.einsum("...Ia,...Ii->...Iai", Xv[k1].conj(), Xo[k2])
+
+
+def build_time_reversal_U(Xo, Xv, kmesh):
+    nkpts = Xo.shape[0]
+    k = torch.arange(nkpts, device=device)
+    neg = utils.negative_k(k, kmesh).to(device=device)
+    Uo = torch.empty((nkpts, Xo.shape[-1], Xo.shape[-1]), dtype=complex_dtype, device=device)
+    Uv = torch.empty((nkpts, Xv.shape[-1], Xv.shape[-1]), dtype=complex_dtype, device=device)
+    for ik in range(nkpts):
+        Uo[ik] = torch.linalg.lstsq(Xo[ik].conj(), Xo[neg[ik]]).solution
+        Uv[ik] = torch.linalg.lstsq(Xv[ik].conj(), Xv[neg[ik]]).solution
+    return Uo, Uv
+
+
+def build_Pov_from_Pvo_time_reversal(Xo, Xv, Uo, Uv, ko, kv, neg):
+    P = build_Pvo_thc(Xo, Xv, neg[kv], neg[ko])
+    return torch.einsum("...Ixy,...xb,...jy->...Ijb", P, Uv[neg[kv]], Uo[ko].conj())
+
+
 def build_Rov_thc(X, W, nocc, kmesh):
     nkpts = X.shape[0]
     nvir = X.shape[-1] - nocc
@@ -59,7 +80,7 @@ def build_Rov_thc(X, W, nocc, kmesh):
     return R, Xo, Xv
 
 
-def canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=False):
+def canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=False, convert=False):
     nkpts = R.shape[0]
     nvir = R.shape[-1]
     k = torch.arange(nkpts, device=device)
@@ -68,6 +89,8 @@ def canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=False):
     e = torch.from_numpy(np.asarray(mo_energy)).to(device=device, dtype=real_dtype)
     eocc = e[:, :nocc]
     evir = e[:, nocc:nocc+nvir]
+    if convert:
+        Uo, Uv = build_time_reversal_U(Xo, Xv, kmesh)
 
     emp2 = torch.tensor(0.0, dtype=real_dtype, device=device)
     for q in range(nkpts):
@@ -75,7 +98,10 @@ def canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=False):
         kp = kq[:, q]
         km = kq[:, neg[q]]
         Ria = R[k, kp]
-        Pjb = build_Pov_thc(Xo, Xv, k, km)
+        if convert:
+            Pjb = build_Pov_from_Pvo_time_reversal(Xo, Xv, Uo, Uv, k, km, neg)
+        else:
+            Pjb = build_Pov_thc(Xo, Xv, k, km)
         G = torch.einsum('kxia,lxjb->kliajb', Ria, Pjb) / nkpts
         denom = (
             eocc[:, None, :, None, None, None]
@@ -90,7 +116,10 @@ def canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=False):
             ka = kp[ik]
             Rib = R[ik, km]
             k2 = torch.full((nkpts,), ka, dtype=torch.long, device=device)
-            Pja = build_Pov_thc(Xo, Xv, k, k2)
+            if convert:
+                Pja = build_Pov_from_Pvo_time_reversal(Xo, Xv, Uo, Uv, k, k2, neg)
+            else:
+                Pja = build_Pov_thc(Xo, Xv, k, k2)
             H = torch.einsum('lxib,lxja->lijba', Rib, Pja) / nkpts
             exchange -= torch.einsum('liajb,lijba->', T[ik], H).real
         emp2 += 2.0 * direct + exchange
@@ -102,10 +131,10 @@ def canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=False):
     return emp2
 
 
-def canonical_mp2_from_thc(X, W, mo_energy, nocc, kmesh, verbose=False):
+def canonical_mp2_from_thc(X, W, mo_energy, nocc, kmesh, verbose=False, convert=False):
     R, Xo, Xv = build_Rov_thc(X, W, nocc, kmesh)
     print("R memory GB", R.numel() * R.element_size() / 1024**3)
-    return canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=verbose)
+    return canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=verbose, convert=convert)
 
 
 
@@ -121,6 +150,7 @@ parser.add_argument("--exact", action="store_true")
 parser.add_argument("--verbose", action="store_true")
 parser.add_argument("--symm", action="store_true")
 parser.add_argument("--real", action="store_true")
+parser.add_argument("--convert", action="store_true")
 ov_group = parser.add_mutually_exclusive_group(required=True)
 ov_group.add_argument("-ov_ref", type=int, default=None)
 ov_group.add_argument("-ov_opt", default=None)
@@ -157,6 +187,7 @@ print("exact", args.exact)
 print("verbose", args.verbose)
 print("symm", args.symm)
 print("real", args.real)
+print("convert", args.convert)
 print("ov_ref", args.ov_ref)
 print("ov_opt", args.ov_opt)
 print("nocc", nocc, "nmo", mo_energy.shape[-1], "nkpts", len(mf.kpts))
@@ -170,7 +201,7 @@ print("load THC time", time.time() - t0)
 print("nth", X.shape[1])
 
 t0 = time.time()
-emp2_custom = canonical_mp2_from_thc(X, W, mo_energy, nocc, kmesh, verbose=args.verbose)
+emp2_custom = canonical_mp2_from_thc(X, W, mo_energy, nocc, kmesh, verbose=args.verbose, convert=args.convert)
 print("MP2 contraction time", time.time() - t0)
 print("custom THC MP2 energy = %.16e" % emp2_custom.detach().cpu().numpy())
 
