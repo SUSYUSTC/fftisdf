@@ -32,9 +32,10 @@ def load_thc(chkfile, C):
         X_ao = np.asarray(f["inpv_kpt"])
         W = np.asarray(f["coul_kpt"])
     X = np.einsum("kIa,kab->kIb", X_ao, C)
+    X_ao = torch.from_numpy(X_ao).to(device=device, dtype=complex_dtype)
     X = torch.from_numpy(X).to(device=device, dtype=complex_dtype)
     W = torch.from_numpy(W).to(device=device, dtype=complex_dtype)
-    return X, W
+    return X_ao, X, W
 
 def build_Pov_thc(Xo, Xv, k1, k2):
     return torch.einsum("...Ii,...Ia->...Iia", Xo[k1].conj(), Xv[k2])
@@ -44,21 +45,30 @@ def build_Pvo_thc(Xo, Xv, k1, k2):
     return torch.einsum("...Ia,...Ii->...Iai", Xv[k1].conj(), Xo[k2])
 
 
-def build_time_reversal_U(Xo, Xv, kmesh):
-    nkpts = Xo.shape[0]
+def build_time_reversal_U(C, nocc, kmesh):
+    nkpts = C.shape[0]
+    o, v = get_part(nocc)
     k = torch.arange(nkpts, device=device)
     neg = utils.negative_k(k, kmesh).to(device=device)
-    Uo = torch.empty((nkpts, Xo.shape[-1], Xo.shape[-1]), dtype=complex_dtype, device=device)
-    Uv = torch.empty((nkpts, Xv.shape[-1], Xv.shape[-1]), dtype=complex_dtype, device=device)
+    Uo = torch.empty((nkpts, nocc, nocc), dtype=complex_dtype, device=device)
+    Uv = torch.empty((nkpts, C.shape[-1] - nocc, C.shape[-1] - nocc), dtype=complex_dtype, device=device)
     for ik in range(nkpts):
-        Uo[ik] = torch.linalg.lstsq(Xo[ik].conj(), Xo[neg[ik]]).solution
-        Uv[ik] = torch.linalg.lstsq(Xv[ik].conj(), Xv[neg[ik]]).solution
+        Uo[ik] = torch.linalg.lstsq(C[ik, :, o].conj(), C[neg[ik], :, o]).solution
+        Uv[ik] = torch.linalg.lstsq(C[ik, :, v].conj(), C[neg[ik], :, v]).solution
     return Uo, Uv
 
 
-def build_Pov_from_Pvo_time_reversal(Xo, Xv, Uo, Uv, ko, kv, neg):
-    P = build_Pvo_thc(Xo, Xv, neg[kv], neg[ko])
-    return torch.einsum("...Ixy,...xb,...jy->...Ijb", P, Uv[neg[kv]], Uo[ko].conj())
+def build_Pvo_time_reversal(Xo, Xv, Uo, Uv, kj, kb, neg):
+    P = build_Pvo_thc(Xo, Xv, neg[kb], neg[kj])
+    return torch.einsum("...Ixy,...xa,...yj->...Iaj", P, Uv[kb].transpose(-1, -2), Uo[kj].conj().transpose(-1, -2))
+
+
+def build_Pov_ao(X_ao, C, k1, k2, o, v):
+    return torch.einsum("...Iu,...Iv,...ui,...va->...Iia", X_ao[k1].conj(), X_ao[k2], C[k1, :, o].conj(), C[k2, :, v])
+
+
+def build_Pvo_ao(X_ao, C, k1, k2, o, v):
+    return torch.einsum("...Iu,...Iv,...ua,...vi->...Iai", X_ao[k1].conj(), X_ao[k2], C[k1, :, v].conj(), C[k2, :, o])
 
 
 def build_Rov_thc(X, W, nocc, kmesh):
@@ -80,7 +90,7 @@ def build_Rov_thc(X, W, nocc, kmesh):
     return R, Xo, Xv
 
 
-def canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=False, convert=False):
+def canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=False, convert=False, Uo=None, Uv=None):
     nkpts = R.shape[0]
     nvir = R.shape[-1]
     k = torch.arange(nkpts, device=device)
@@ -89,9 +99,6 @@ def canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=False, conve
     e = torch.from_numpy(np.asarray(mo_energy)).to(device=device, dtype=real_dtype)
     eocc = e[:, :nocc]
     evir = e[:, nocc:nocc+nvir]
-    if convert:
-        Uo, Uv = build_time_reversal_U(Xo, Xv, kmesh)
-
     emp2 = torch.tensor(0.0, dtype=real_dtype, device=device)
     for q in range(nkpts):
         t0 = time.time()
@@ -99,10 +106,11 @@ def canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=False, conve
         km = kq[:, neg[q]]
         Ria = R[k, kp]
         if convert:
-            Pjb = build_Pov_from_Pvo_time_reversal(Xo, Xv, Uo, Uv, k, km, neg)
+            Pbj = build_Pvo_time_reversal(Xo, Xv, Uo, Uv, k, km, neg)
+            G = torch.einsum('kxia,lxbj->kliajb', Ria, Pbj) / nkpts
         else:
             Pjb = build_Pov_thc(Xo, Xv, k, km)
-        G = torch.einsum('kxia,lxjb->kliajb', Ria, Pjb) / nkpts
+            G = torch.einsum('kxia,lxjb->kliajb', Ria, Pjb) / nkpts
         denom = (
             eocc[:, None, :, None, None, None]
             - evir[kp][:, None, None, :, None, None]
@@ -117,10 +125,11 @@ def canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=False, conve
             Rib = R[ik, km]
             k2 = torch.full((nkpts,), ka, dtype=torch.long, device=device)
             if convert:
-                Pja = build_Pov_from_Pvo_time_reversal(Xo, Xv, Uo, Uv, k, k2, neg)
+                Paj = build_Pvo_time_reversal(Xo, Xv, Uo, Uv, k, k2, neg)
+                H = torch.einsum('lxib,lxaj->lijba', Rib, Paj) / nkpts
             else:
                 Pja = build_Pov_thc(Xo, Xv, k, k2)
-            H = torch.einsum('lxib,lxja->lijba', Rib, Pja) / nkpts
+                H = torch.einsum('lxib,lxja->lijba', Rib, Pja) / nkpts
             exchange -= torch.einsum('liajb,lijba->', T[ik], H).real
         emp2 += 2.0 * direct + exchange
         if verbose:
@@ -131,10 +140,80 @@ def canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=False, conve
     return emp2
 
 
-def canonical_mp2_from_thc(X, W, mo_energy, nocc, kmesh, verbose=False, convert=False):
-    R, Xo, Xv = build_Rov_thc(X, W, nocc, kmesh)
+def build_Rov_ao(X_ao, C, W, nocc, kmesh):
+    nkpts = X_ao.shape[0]
+    nmo = C.shape[-1]
+    nvir = nmo - nocc
+    nth = X_ao.shape[1]
+    o, v = get_part(nocc)
+    k = torch.arange(nkpts, device=device)
+    neg = utils.negative_k(k, kmesh).to(device=device)
+
+    R = torch.empty((nkpts, nkpts, nth, nocc, nvir), dtype=complex_dtype, device=device)
+    for k1 in range(nkpts):
+        for k2 in range(nkpts):
+            q = utils.add_k(k2, neg[k1], kmesh).item()
+            P = build_Pov_ao(X_ao, C, k1, k2, o, v).reshape((nth, nocc * nvir))
+            R[k1, k2] = (P.T @ W[q]).T.reshape((nth, nocc, nvir))
+    return R
+
+
+def canonical_mp2_from_thc_convert(X_ao, C, W, mo_energy, nocc, kmesh, verbose=False):
+    nkpts = X_ao.shape[0]
+    nmo = C.shape[-1]
+    nvir = nmo - nocc
+    o, v = get_part(nocc)
+    k = torch.arange(nkpts, device=device)
+    neg = utils.negative_k(k, kmesh).to(device=device)
+    kq = utils.add_k(k[:, None], k[None, :], kmesh).to(device=device)
+    e = torch.from_numpy(np.asarray(mo_energy)).to(device=device, dtype=real_dtype)
+    eocc = e[:, :nocc]
+    evir = e[:, nocc:nocc+nvir]
+
+    R = build_Rov_ao(X_ao, C, W, nocc, kmesh)
     print("R memory GB", R.numel() * R.element_size() / 1024**3)
-    return canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=verbose, convert=convert)
+
+    emp2 = torch.tensor(0.0, dtype=real_dtype, device=device)
+    for q in range(nkpts):
+        t0 = time.time()
+        kp = kq[:, q]
+        km = kq[:, neg[q]]
+        Ria = R[k, kp]
+        Pbj = build_Pvo_ao(X_ao, C, neg[km], neg[k], o, v)
+        G = torch.einsum('kxia,lxbj->kliajb', Ria, Pbj) / nkpts
+        denom = (
+            eocc[:, None, :, None, None, None]
+            - evir[kp][:, None, None, :, None, None]
+            + eocc[None, :, None, None, :, None]
+            - evir[km][None, :, None, None, None, :]
+        )
+        T = G.conj() / denom
+        direct = torch.einsum('kliajb,kliajb->', T, G).real
+        exchange = torch.tensor(0.0, dtype=real_dtype, device=device)
+        for ik in range(nkpts):
+            ka = kp[ik]
+            Rib = R[ik, km]
+            k2 = torch.full((nkpts,), ka, dtype=torch.long, device=device)
+            Paj = build_Pvo_ao(X_ao, C, neg[k2], neg[k], o, v)
+            H = torch.einsum('lxib,lxaj->lijba', Rib, Paj) / nkpts
+            exchange -= torch.einsum('liajb,lijba->', T[ik], H).real
+        emp2 += 2.0 * direct + exchange
+        if verbose:
+            print('q %3d  direct %.12e  exchange %.12e  time %.4f' % (
+                q, direct.item(), exchange.item(), time.time() - t0,
+            ), flush=True)
+    emp2 /= nkpts
+    return emp2
+
+
+def canonical_mp2_from_thc(X_ao, X, C, W, mo_energy, nocc, kmesh, verbose=False, convert=False):
+    R, Xo, Xv = build_Rov_thc(X, W, nocc, kmesh)
+    if convert:
+        Uo, Uv = build_time_reversal_U(C, nocc, kmesh)
+    else:
+        Uo, Uv = None, None
+    print("R memory GB", R.numel() * R.element_size() / 1024**3)
+    return canonical_mp2_from_R(R, Xo, Xv, mo_energy, nocc, kmesh, verbose=verbose, convert=convert, Uo=Uo, Uv=Uv)
 
 
 
@@ -178,6 +257,7 @@ with open(dft_pkl, "rb") as f:
 nocc = mf.cell.nelectron // 2
 mo_energy = np.asarray(mf.mo_energy)
 C = np.asarray(mf.mo_coeff)
+C_t = torch.from_numpy(C).to(device=device, dtype=complex_dtype)
 
 print("kmesh", kmesh)
 print("basis", basis)
@@ -196,12 +276,12 @@ print("DFT pkl", dft_pkl)
 print("OV THC", ov_chk)
 
 t0 = time.time()
-X, W = load_thc(ov_chk, C)
+X_ao, X, W = load_thc(ov_chk, C)
 print("load THC time", time.time() - t0)
 print("nth", X.shape[1])
 
 t0 = time.time()
-emp2_custom = canonical_mp2_from_thc(X, W, mo_energy, nocc, kmesh, verbose=args.verbose, convert=args.convert)
+emp2_custom = canonical_mp2_from_thc(X_ao, X, C_t, W, mo_energy, nocc, kmesh, verbose=args.verbose, convert=args.convert)
 print("MP2 contraction time", time.time() - t0)
 print("custom THC MP2 energy = %.16e" % emp2_custom.detach().cpu().numpy())
 
