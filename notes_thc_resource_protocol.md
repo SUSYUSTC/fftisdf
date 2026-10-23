@@ -79,6 +79,8 @@ actual numbers only roughly follow it; this file records what was really done.
 - Code is synced ONLY by git (repo SUSYUSTC/fftisdf, branch general): edit locally, commit,
   push, then `git pull --ff-only` on central and DGX. Never rsync/scp code between hosts.
   Data (DFT pkl, ISDF chk) is moved by rsync (sync_ISDF.sh on DGX).
+- Never git-track bash scripts (*.sh is in .gitignore); they are host-local job scripts.
+- Always ask the user for approval before tracking any new file.
 
 ### 3.6 2D ISDF candidate grid (2026-10-23)
 - Same generate_isdf_gdf.py as 3D. For cell.dimension == 2: candidates = uniform grid (same
