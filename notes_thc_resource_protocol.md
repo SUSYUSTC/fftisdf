@@ -76,6 +76,10 @@ actual numbers only roughly follow it; this file records what was really done.
 - THC optimization (optimize_X_ov/full.py) and THC-only checks (custom_mp2_thc.py) run on
   DGX GPUs. Anything that needs GDF (custom_mp2_df.py, bse_df.py) runs on central.
 
+- Code is synced ONLY by git (repo SUSYUSTC/fftisdf, branch general): edit locally, commit,
+  push, then `git pull --ff-only` on central and DGX. Never rsync/scp code between hosts.
+  Data (DFT pkl, ISDF chk) is moved by rsync (sync_ISDF.sh on DGX).
+
 ### 3.6 Other conventions in the old tables
 - MgO/BN/AlN high-error (0.005 eV/e) values were NOT fitted: value = low-error value x
   (diamond high / diamond low) at the same nk. New systems should be fitted directly.
