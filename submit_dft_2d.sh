@@ -33,12 +33,24 @@ function submit(){
 # 	submit CdSe2D $nk 32 250GB
 # done
 
-# rerun MoSe2D with gdf j2c_eig_always (settings.pydata); old files moved to old_cd/
-for system in MoSe2D; do
-	for nk in 2 3 4; do
-		submit $system $nk 16 64GB
-	done
-	for nk in 5 6 7 8; do
-		submit $system $nk 32 250GB
-	done
+# # rerun MoSe2D with gdf j2c_eig_always (settings.pydata); old files moved to old_cd/
+# for system in MoSe2D; do
+# 	for nk in 2 3 4; do
+# 		submit $system $nk 16 64GB
+# 	done
+# 	for nk in 5 6 7 8; do
+# 		submit $system $nk 32 250GB
+# 	done
+# done
+
+# rerun blackP2D and CdSe2D with gdf j2c_eig_always (settings.pydata); old files moved to old_cd/
+for nk in 2 3 4; do
+	submit blackP2D $nk 16 64GB
+done
+for nk in 5 6 7 8; do
+	submit blackP2D $nk 32 250GB
+done
+submit CdSe2D 2 16 64GB
+for nk in 3 4; do
+	submit CdSe2D $nk 32 250GB
 done
