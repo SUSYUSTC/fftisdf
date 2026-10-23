@@ -97,3 +97,6 @@ log*/
 *.pdf
 *.lprof
 *.sw[op]
+
+# Bash scripts are host-local (not tracked)
+*.sh
