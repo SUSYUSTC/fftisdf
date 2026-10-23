@@ -80,6 +80,17 @@ actual numbers only roughly follow it; this file records what was really done.
   push, then `git pull --ff-only` on central and DGX. Never rsync/scp code between hosts.
   Data (DFT pkl, ISDF chk) is moved by rsync (sync_ISDF.sh on DGX).
 
+### 3.6 2D ISDF candidate grid (2026-10-23)
+- Same generate_isdf_gdf.py as 3D. For cell.dimension == 2: candidates = uniform grid (same
+  spacing h in x, y, z) truncated in z where the xy-averaged AO density
+  <sum_mu |chi_mu|^2>_xy < grid_eps * max (default 1e-8), symmetric about the slab center;
+  h = finest spacing with <= CHOLESKY_MAX_SIZE (20000) points (as the 3D mesh is scaled).
+  MoSe2D h 0.21 A (+-7.8 A), blackP2D 0.22 A (+-6.3 A), CdSe2D 0.27 A (+-9.5 A).
+- Old uniform full-cell grid (70% vacuum, ~0.25-0.47 A) was too coarse: MoSe2D 3x3x1 ov c16
+  11% vs 0.4% on a slab grid at the same point count.
+- Tests (3x3x1, ov c16, full c36): spacing 0.12-0.27 A all equivalent (+-20%, non-monotonic);
+  z spacing decaying with n_AO^-p did not help; covering the density tail matters most.
+
 ### 3.6 Other conventions in the old tables
 - MgO/BN/AlN high-error (0.005 eV/e) values were NOT fitted: value = low-error value x
   (diamond high / diamond low) at the same nk. New systems should be fitted directly.
@@ -130,6 +141,11 @@ actual numbers only roughly follow it; this file records what was really done.
   784-794 -> also affected; not needed now). Uniform-naux 3D systems may still have
   ill-conditioned CD at some q; not checked yet.
 - MoSe2D rerun with the fix (old files in data dir `old_cd/`).
+
+Current scope (2026-10-23): 2D MoSe2, 2D black P, 3D zinc blende CdSe (CdSezb, previous
+3D settings: bare ov + screened full). 2D: bare full ERI instead of screened; metric is the
+(ov|vo)-projected error. All 2D GDFs rebuilt with j2c_eig_always (PySCF 2.14 on central).
+c_ref is determined on a medium-large k-mesh (6x6x1 for 2D, 4x4x4 for CdSezb).
 
 ## 6. TODO (2D: blackP2D, MoSe2D, CdSe2D; 3D: PbSebulk, CdSezb)
 
