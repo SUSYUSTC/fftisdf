@@ -35,26 +35,46 @@ def get_cholesky_mesh(mesh, max_size):
     return mesh1
 
 
-def get_slab_candidates(cell, max_size, margin):
-    # uniform grid restricted to the slab |z - z_atoms| <= margin (bohr, periodic in z), as fine as max_size allows
+def get_decay_candidates(cell, hxy, ratio, power, eps):
+    # 2D candidate points: uniform xy grid with spacing ~hxy (bohr); in z, spacing
+    # h(z) = h0 * max(1, (n0 / n(z))**power), h0 = ratio * hxy, n(z) = xy-averaged sum_mu |chi_mu|^2,
+    # n0 = n at the outermost atomic plane; stop where n(z) < eps * max n; symmetric about the slab center
     a = cell.lattice_vectors()
     assert abs(a[0, 2]) < 1e-8 and abs(a[1, 2]) < 1e-8 and abs(a[2, 0]) < 1e-8 and abs(a[2, 1]) < 1e-8
     Lz = a[2, 2]
     z_atom = cell.atom_coords()[:, 2]
-    zc = z_atom[0]
-    dz_atom = (z_atom - zc + Lz / 2) % Lz - Lz / 2
-    z0 = dz_atom.min() - margin
-    z1 = dz_atom.max() + margin
-    area = abs(np.linalg.det(a[:2, :2]))
-    h = (area * (z1 - z0) / max_size) ** (1.0 / 3.0)
-    while True:
-        mesh = np.ceil(np.linalg.norm(a, axis=1) / h).astype(int)
-        coords = cell.get_uniform_grids(mesh)
-        dz = (coords[:, 2] - zc + Lz / 2) % Lz - Lz / 2
-        mask = (dz >= z0) & (dz <= z1)
-        if mask.sum() <= max_size:
-            return coords[mask], mesh
-        h *= 1.01
+    dz_atom = (z_atom - z_atom[0] + Lz / 2) % Lz - Lz / 2
+    zc = z_atom[0] + 0.5 * (dz_atom.min() + dz_atom.max())
+    half = 0.5 * (dz_atom.max() - dz_atom.min())
+
+    nxy = 12
+    f = (np.arange(nxy) + 0.5) / nxy
+    xy = np.stack(np.meshgrid(f, f, indexing="ij"), -1).reshape(-1, 2) @ a[:2, :2]
+    zf = np.linspace(0.0, Lz / 2, 1501)
+    n = np.empty(len(zf))
+    for i, z in enumerate(zf):
+        ao = cell.pbc_eval_gto("GTOval", np.hstack([xy, np.full((len(xy), 1), zc + z)]))
+        n[i] = (ao ** 2).sum(1).mean()
+    n0 = np.interp(half, zf, n)
+    zcut = zf[np.where(n > eps * n.max())[0].max()]
+
+    h0 = ratio * hxy
+    h = h0 * np.maximum(1.0, (n0 / np.maximum(n, 1e-300)) ** power)
+    s_cum = np.concatenate([[0.0], np.cumsum(0.5 * (1 / h[1:] + 1 / h[:-1]) * np.diff(zf))])
+    s_cut = np.interp(zcut, zf, s_cum)
+    z_pos = np.interp(np.arange(1, int(np.floor(s_cut)) + 1), s_cum, zf)
+    z_nodes = np.concatenate([-z_pos[::-1], [0.0], z_pos]) + zc
+    assert 2 * z_pos[-1] < Lz
+
+    nx = int(np.ceil(np.linalg.norm(a[0]) / hxy))
+    ny = int(np.ceil(np.linalg.norm(a[1]) / hxy))
+    if abs(np.linalg.norm(a[0]) - np.linalg.norm(a[1])) < 1e-6:
+        nx = ny = max(nx, ny)
+    fx = np.arange(nx) / nx
+    fy = np.arange(ny) / ny
+    xy_grid = np.stack(np.meshgrid(fx, fy, indexing="ij"), -1).reshape(-1, 2) @ a[:2, :2]
+    coords = np.concatenate([np.hstack([xy_grid, np.full((len(xy_grid), 1), z)]) for z in z_nodes])
+    return coords, (nx, ny, len(z_nodes)), z_nodes - zc
 
 
 def screen_gdf_tensor(R, eps_inv_half, kmesh):
@@ -95,7 +115,11 @@ parser.add_argument("--MP2", action='store_true')
 parser.add_argument("--screen", action='store_true')
 parser.add_argument("--ov", action='store_true')
 parser.add_argument("-cholesky_max", type=int, default=None)
-parser.add_argument("-slab_margin", type=float, default=4.0)
+parser.add_argument("-chk", default="chk.isdf")
+parser.add_argument("-grid_hxy", type=float, default=0.19)
+parser.add_argument("-grid_ratio", type=float, default=1.0)
+parser.add_argument("-grid_power", type=float, default=1.0 / 3.0)
+parser.add_argument("-grid_eps", type=float, default=1e-8)
 args = parser.parse_args()
 
 system = args.system
@@ -121,7 +145,7 @@ screen_tag = "screen" if screen else "bare"
 if args.save:
     chkfile = os.path.join(data_dir, f"ISDF{block_tag}_{screen_tag}GDF_{klabel}_c{c_isdf}.chk")
 else:
-    chkfile = 'chk.isdf'
+    chkfile = args.chk
 
 with open(dft_pkl, "rb") as f:
     mf = pickle.load(f)
@@ -134,10 +158,14 @@ assert utils.is_k_ordered(kpts_int, kmesh)
 cholesky_max = fft.isdf.CHOLESKY_MAX_SIZE if args.cholesky_max is None else args.cholesky_max
 fft.isdf.CHOLESKY_MAX_SIZE = cholesky_max
 cholesky_mesh = get_cholesky_mesh(cell.mesh, cholesky_max)
-# 2D: candidate interpolation points only in the slab region (vacuum points are wasted)
-slab_margin = args.slab_margin
+# 2D: candidate interpolation points on a uniform xy grid and a z grid that decays with the AO density
+grid_hxy = args.grid_hxy
+grid_ratio = args.grid_ratio
+grid_power = args.grid_power
+grid_eps = args.grid_eps
 if cell.dimension == 2:
-    slab_coords, cholesky_mesh = get_slab_candidates(cell, cholesky_max, slab_margin / 0.52917721092)
+    B = 0.52917721092
+    slab_coords, cholesky_mesh, z_nodes = get_decay_candidates(cell, grid_hxy / B, grid_ratio, grid_power, grid_eps)
 
 C = np.asarray(mf.mo_coeff)
 nkpts, nao, nmo = C.shape
@@ -155,9 +183,15 @@ print("cholesky mesh  =", cholesky_mesh)
 print("cholesky size  =", int(np.prod(cholesky_mesh)))
 print("cholesky max   =", cholesky_max)
 if cell.dimension == 2:
-    print("slab margin(A) =", slab_margin)
+    print("grid hxy(A)    =", grid_hxy)
+    print("grid ratio     =", grid_ratio)
+    print("grid power     =", grid_power)
+    print("grid eps       =", grid_eps)
+    print("grid xy        =", cholesky_mesh[:2])
+    print("grid z nodes   =", len(z_nodes), "extent(A) = %.2f" % (z_nodes.max() * B))
+    print("grid dz(A)     =", np.round(np.diff(z_nodes[len(z_nodes) // 2:]) * B, 3))
     print("slab points    =", slab_coords.shape[0])
-    print("grid spacing(A)=", np.linalg.norm(cell.lattice_vectors(), axis=1) / cholesky_mesh * 0.52917721092)
+    assert slab_coords.shape[0] <= cholesky_max
 print("kmesh          =", kmesh)
 print("basis          =", basis)
 print("nao            =", nao)
