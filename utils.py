@@ -220,9 +220,17 @@ def get_gdf_tensor_compact(gdf, kpts_int, kmesh, C1=None, C2=None, *, layout, pr
     label = gdf._dataname
     k1_all, k2_all, q_all = _get_gdf_layout_indices(kpts_int, kmesh, layout)
 
+    # open the file once: reopening it per (k1, k2) block costs O(number of blocks) each time
+    feri_pos = pyscf.pbc.df.df._load3c(gdf._cderi, label, ignore_key_error=True)
+    feri_neg = pyscf.pbc.df.df._load3c(gdf._cderi, label + "-", ignore_key_error=True)
+    get_pos = feri_pos.__enter__()
+    get_neg = feri_neg.__enter__()
+
     def load(label, kpt1, kpt2):
-        with pyscf.pbc.df.df._load3c(gdf._cderi, label, (kpt1, kpt2), ignore_key_error=True) as L:
-            return np.asarray(L)
+        get = get_neg if label.endswith("-") else get_pos
+        if not callable(get):
+            return np.zeros(0)
+        return np.asarray(get(kpt1, kpt2))
 
     npos = np.zeros(nkpts, dtype=int)
     nneg = np.zeros(nkpts, dtype=int)
@@ -270,9 +278,76 @@ def get_gdf_tensor_compact(gdf, kpts_int, kmesh, C1=None, C2=None, *, layout, pr
         if C2 is not None:
             block = block @ C2[k2]
         R[i, j, :block.shape[0]] = block
+    feri_pos.__exit__(None, None, None)
+    feri_neg.__exit__(None, None, None)
     if signed:
         return R, S
     return R
+
+
+def make_fast_get_jk(mydf, kmesh, gdf_path=None):
+    '''
+    Returns a drop-in replacement of mydf.get_jk (same signature) that keeps the whole GDF tensor
+    V[k1, k2, L, p, q] in memory, usage: mydf.get_jk = make_fast_get_jk(mydf, kmesh, gdf_path)
+    gdf_path: GDF file to load from (e.g. a copy in /dev/shm), default mydf._cderi
+    Same formulas as pyscf.pbc.df.df_jk.get_j_kpts / get_k_kpts:
+        rho[x, L] = 1/Nk sum_k sum_pq V[k, k, L, p, q] D[x, k, q, p],  J[x, k] = sum_L rho[x, L] V[k, k, L]
+        K[x, k2, p, q] = 1/Nk sum_k1 sum_L sum_rs conj(V[k1, k2, L, s, p]) D[x, k1, s, r] V[k1, k2, L, r, q]
+    K uses the SVD D = U S Vh truncated to its numerical rank (rank n_occ for HF and CIS).
+    The loaded tensor is reordered in place to V[k1, k2, r, L, q], so mydf keeps no other copy.
+    Anything else (omega, kpts_band, other kpts) falls back to the original pyscf get_jk.
+    '''
+    from pyscf.pbc.df import df_jk
+
+    get_jk_orig = mydf.get_jk
+    cell = mydf.cell
+    kpts0 = np.asarray(mydf.kpts)
+    nk = len(kpts0)
+    kpts_int = np.round(cell.get_scaled_kpts(kpts0) * kmesh).astype(int) % kmesh
+    cderi = mydf._cderi
+    if gdf_path is not None:
+        mydf._cderi = gdf_path
+    V = get_gdf_tensor_compact(mydf, kpts_int, kmesh, layout="k1k2")
+    mydf._cderi = cderi
+    Vkk = V[np.arange(nk), np.arange(nk)]
+    nao = V.shape[-1]
+    naux = V.shape[2]
+    # in-place reorder to Vt[k1, k2, r, (L, q)] = V[k1, k2, L, r, q] so that K is a few large GEMMs
+    for k1 in range(nk):
+        V[k1] = np.ascontiguousarray(V[k1].transpose(0, 2, 1, 3)).reshape(nk, naux, nao, nao)
+    Vt = V.reshape(nk, nk, nao, naux * nao)
+
+    def fast_get_jk(dm, hermi=1, kpts=None, kpts_band=None, with_j=True, with_k=True, omega=None, exxdiv=None):
+        if (omega is not None and omega != 0) or kpts_band is not None or (kpts is not None and not np.allclose(kpts, kpts0)):
+            return get_jk_orig(dm, hermi, kpts, kpts_band, with_j, with_k, omega, exxdiv)
+        dm_kpts = lib.asarray(dm, order="C")
+        dms = df_jk._format_dms(dm_kpts, kpts0)
+        nset = dms.shape[0]
+        vj = vk = None
+        if with_j:
+            rho = np.einsum("kLpq,xkqp->xL", Vkk, dms) / nk
+            vj = df_jk._format_jks(np.einsum("xL,kLpq->xkpq", rho, Vkk), dm_kpts, None, kpts0)
+        if with_k:
+            U, S, Vh = np.linalg.svd(dms)
+            rank = max(1, int((S > S.max() * 1e-14).sum(axis=-1).max()))
+            US = U[..., :rank] * S[..., None, :rank]
+            # rows [conj(US)^T; Vh] for all sets: A[k1, (x, 2, i), s]
+            A = np.stack([US.conj().swapaxes(-1, -2), Vh[..., :rank, :]], axis=2)
+            A = A.transpose(1, 0, 2, 3, 4).reshape(nk, nset * 2 * rank, nao)
+            vk = np.empty(dms.shape, dtype=np.complex128)
+            for k2 in range(nk):
+                # W1c[i, (L, p)] = sum_s conj(US[s, i]) V[L, s, p],  W2[i, (L, q)] = sum_r Vh[i, r] V[L, r, q]
+                W = np.matmul(A, Vt[:, k2]).reshape(nk, nset, 2, rank, naux, nao)
+                W1c = W[:, :, 0].transpose(1, 0, 2, 3, 4).reshape(nset, -1, nao)
+                W2 = W[:, :, 1].transpose(1, 0, 2, 3, 4).reshape(nset, -1, nao)
+                # K[p, q] = sum_{k1, i, L} conj(W1c[i, p]) W2[i, q]
+                vk[:, k2] = np.matmul(W1c.conj().swapaxes(-1, -2), W2) / nk
+            if exxdiv == "ewald" and cell.dimension != 0:
+                df_jk._ewald_exxdiv_for_G0(cell, kpts0, dms, vk, None)
+            vk = df_jk._format_jks(vk, dm_kpts, None, kpts0)
+        return vj, vk
+
+    return fast_get_jk
 
 
 def gdf_compact_to_full(tensor_in, kpts_int, kmesh, *, layout):
