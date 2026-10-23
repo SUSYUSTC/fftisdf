@@ -31,7 +31,7 @@ def build_Rov(mf, nocc, kpts_int, kmesh):
     C = np.asarray(mf.mo_coeff)
     Cocc = C[:, :, o]
     Cvir = C[:, :, v]
-    R = utils.get_gdf_tensor_compact(
+    R, S = utils.get_gdf_tensor_compact(
         mf.with_df,
         kpts_int,
         kmesh,
@@ -39,11 +39,13 @@ def build_Rov(mf, nocc, kpts_int, kmesh):
         C2=Cvir,
         layout="k1k2",
         progressbar=False,
+        signed=True,
     )
-    return torch.from_numpy(R).to(device=device, dtype=complex_dtype)
+    return torch.from_numpy(R).to(device=device, dtype=complex_dtype), torch.from_numpy(S).to(device=device, dtype=complex_dtype)
 
 
-def canonical_mp2_from_R(R, mo_energy, nocc, kmesh, verbose=False):
+def canonical_mp2_from_R(R, S, mo_energy, nocc, kmesh, verbose=False):
+    # R in k1k2 layout, S[q, x] signs of the auxiliary channels at momentum q = k2 - k1
     nkpts = R.shape[0]
     nvir = R.shape[-1]
     k = torch.arange(nkpts, device=device)
@@ -60,7 +62,7 @@ def canonical_mp2_from_R(R, mo_energy, nocc, kmesh, verbose=False):
         km = kq[:, neg[q]]
         Ria = R[k, kp]
         Rjb = R[k, km]
-        G = torch.einsum("kxia,lxjb->kliajb", Ria, Rjb) / nkpts
+        G = torch.einsum("kxia,x,lxjb->kliajb", Ria, S[q], Rjb) / nkpts
         denom = (
             eocc[:, None, :, None, None, None]
             - evir[kp][:, None, None, :, None, None]
@@ -74,7 +76,8 @@ def canonical_mp2_from_R(R, mo_energy, nocc, kmesh, verbose=False):
             ka = kp[ik]
             Rib = R[ik, km]
             Rja = R[k, ka]
-            H = torch.einsum("lxib,lxja->lijba", Rib, Rja) / nkpts
+            Sl = S[utils.add_k(km, neg[ik], kmesh).to(device=device)]
+            H = torch.einsum("lxib,lx,lxja->lijba", Rib, Sl, Rja) / nkpts
             exchange -= torch.einsum("liajb,lijba->", T[ik], H).real
         emp2 += 2.0 * direct + exchange
         if verbose:
@@ -131,16 +134,18 @@ print("SCF energy", mf.e_tot)
 print("DFT pkl", dft_pkl)
 
 t0 = time.time()
-R = build_Rov(mf, nocc, kpts_int, kmesh)
+R, S = build_Rov(mf, nocc, kpts_int, kmesh)
 print("build R time", time.time() - t0)
 print("naux", R.shape[2])
 
-emp2_custom = canonical_mp2_from_R(R, mo_energy, nocc, kmesh, verbose=args.verbose)
+emp2_custom = canonical_mp2_from_R(R, S, mo_energy, nocc, kmesh, verbose=args.verbose)
 print("custom DF MP2 energy = %.16e" % emp2_custom.detach().cpu().numpy())
 
 if args.exact:
     pt = mp.KMP2(mf)
     pt.verbose = 0
+    # PySCF's DF-driven KMP2 ignores the negative 2D channel; ao2mo includes it
+    pt.with_df_ints = mf.cell.dimension == 3
     emp2_pyscf, _ = pt.kernel(with_t2=False)
     print("PySCF MP2 energy     = %.16e" % emp2_pyscf)
     print("custom - PySCF       = %.16e" % (emp2_custom.detach().cpu().numpy() - emp2_pyscf))

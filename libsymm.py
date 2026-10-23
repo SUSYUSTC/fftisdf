@@ -5,6 +5,14 @@ from pyscf.pbc.symm import Symmetry
 import pyscf.pbc.symm.symmetry
 
 
+def canonicalize_space_group_translations(ops, tol=1e-3):
+    for op in ops:
+        trans12 = op.trans * 12
+        trans12_int = np.rint(trans12)
+        assert np.max(np.abs(trans12 - trans12_int)) < tol
+        op.trans[:] = trans12_int / 12
+
+
 # Utilities for symmetry-preserving ISDF point selection.
 #
 # The central object is the uniform real-space grid used by ISDF. A space-group
@@ -64,6 +72,7 @@ def build_symmetry_kpts(cell, kmesh, time_reversal=False):
         space_group_symmetry=True,
         time_reversal_symmetry=time_reversal,
     )
+    canonicalize_space_group_translations(kpts.ops)
     return cell_sym, kpts
 
 
@@ -339,6 +348,7 @@ def classify_grid_by_symmetry(cell, mesh, coords=None, tol=1e-6):
         symmorphic=False,
         check_mesh_symmetry=False,
     )
+    canonicalize_space_group_translations(symm.ops)
 
     op_ids = []
     perms = []

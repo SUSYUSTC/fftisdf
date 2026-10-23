@@ -4,6 +4,7 @@ import torch
 import builtins
 from inspect import signature, Parameter
 from pyscf import lib
+import pyscf.pbc.df.df
 
 has_profile = hasattr(builtins, 'profile')
 if not has_profile:
@@ -208,12 +209,39 @@ def _get_gdf_layout_indices(kpts_int, kmesh, layout):
     return k1, k2, q
 
 
-def get_gdf_tensor_compact(gdf, kpts_int, kmesh, C1=None, C2=None, *, layout, progressbar=False):
+def get_gdf_tensor_compact(gdf, kpts_int, kmesh, C1=None, C2=None, *, layout, progressbar=False, signed=False):
+    # naux may differ between q; blocks are zero-padded to the max naux
+    # (CDERIArray.load truncates all blocks to the naux of the first one, so use _load3c)
+    # signed=True also loads the negative channel 'j3c-' (e.g. 2D truncated Coulomb at q=0) and returns (R, S),
+    # with (pq|rs) = sum_x S[q, x] R_x,pq R_x,rs^*; rows are [positive, negative, zero padding], S[q] = +1, -1, 0
     kpts = np.asarray(gdf.kpts)
     nkpts = len(kpts)
     nao = gdf.cell.nao_nr()
-    cderi = gdf.cderi_array()
-    naux = cderi.load(kpts[0], kpts[0]).shape[0]
+    label = gdf._dataname
+    k1_all, k2_all, q_all = _get_gdf_layout_indices(kpts_int, kmesh, layout)
+
+    def load(label, kpt1, kpt2):
+        with pyscf.pbc.df.df._load3c(gdf._cderi, label, (kpt1, kpt2), ignore_key_error=True) as L:
+            return np.asarray(L)
+
+    npos = np.zeros(nkpts, dtype=int)
+    nneg = np.zeros(nkpts, dtype=int)
+    k1_q, k2_q, q_q = _get_gdf_layout_indices(kpts_int, kmesh, "k1q")
+    for q in range(nkpts):
+        npos[q] = load(label, kpts[k1_q[0, q]], kpts[k2_q[0, q]]).shape[0]
+        Lm = load(label + "-", kpts[k1_q[0, q]], kpts[k2_q[0, q]])
+        if Lm.ndim == 2:
+            nneg[q] = Lm.shape[0]
+    if signed:
+        naux = int((npos + nneg).max())
+        S = np.zeros((nkpts, naux))
+        for q in range(nkpts):
+            S[q, :npos[q]] = 1.0
+            S[q, npos[q]:npos[q] + nneg[q]] = -1.0
+        print("signed GDF: naux(+) =", npos.tolist(), " naux(-) =", nneg.tolist())
+    else:
+        assert nneg.sum() == 0, "GDF has a negative channel, use signed=True"
+        naux = int(npos.max())
     if C1 is None:
         n1 = nao
     else:
@@ -222,9 +250,8 @@ def get_gdf_tensor_compact(gdf, kpts_int, kmesh, C1=None, C2=None, *, layout, pr
         n2 = nao
     else:
         n2 = C2.shape[2]
-    R = np.empty((nkpts, nkpts, naux, n1, n2), dtype=np.complex128)
+    R = np.zeros((nkpts, nkpts, naux, n1, n2), dtype=np.complex128)
 
-    k1_all, k2_all, q_all = _get_gdf_layout_indices(kpts_int, kmesh, layout)
     pairs = [(i, j) for i in range(nkpts) for j in range(nkpts)]
     if progressbar:
         import tqdm
@@ -232,15 +259,19 @@ def get_gdf_tensor_compact(gdf, kpts_int, kmesh, C1=None, C2=None, *, layout, pr
     for i, j in pairs:
         k1 = k1_all[i, j]
         k2 = k2_all[i, j]
-        block = cderi.load(kpts[k1], kpts[k2])
+        block = load(label, kpts[k1], kpts[k2])
+        if signed and nneg[q_all[i, j]] > 0:
+            block = np.concatenate([block, load(label + "-", kpts[k1], kpts[k2])], axis=0)
         if block.shape[1] == nao * (nao + 1) // 2:
             block = lib.unpack_tril(block)
-        block = block.reshape(naux, nao, nao)
+        block = block.reshape(-1, nao, nao)
         if C1 is not None:
             block = C1[k1].conj().T @ block
         if C2 is not None:
             block = block @ C2[k2]
-        R[i, j] = block
+        R[i, j, :block.shape[0]] = block
+    if signed:
+        return R, S
     return R
 
 
@@ -620,15 +651,18 @@ def thc_df_ov_build_A_from_mo(Xo, Xv, R, kmesh):
 
 
 @maybe_profile
-def thc_df_ov_rhs_from_mo(Xo, Xv, R, kmesh):
+def thc_df_ov_rhs_from_mo(Xo, Xv, R, kmesh, S=None):
     A = thc_df_ov_build_A_from_mo(Xo, Xv, R, kmesh)
-    B = torch.einsum("qIx,qJx->qIJ", A, A.conj())
+    if S is None:
+        B = torch.einsum("qIx,qJx->qIJ", A, A.conj())
+    else:
+        B = torch.einsum("qIx,qx,qJx->qIJ", A, S.to(dtype=A.dtype, device=A.device), A.conj())
     return B
 
 
 @maybe_profile
-def thc_df_ov_inner_from_mo(Xo, Xv, W, R, kmesh, by_q=False):
-    B = thc_df_ov_rhs_from_mo(Xo, Xv, R, kmesh)
+def thc_df_ov_inner_from_mo(Xo, Xv, W, R, kmesh, by_q=False, S=None):
+    B = thc_df_ov_rhs_from_mo(Xo, Xv, R, kmesh, S=S)
     value = torch.einsum("qIJ,qIJ->q", W.conj(), B)
     if by_q:
         return value
@@ -636,71 +670,76 @@ def thc_df_ov_inner_from_mo(Xo, Xv, W, R, kmesh, by_q=False):
 
 
 @maybe_profile
-def thc_df_inner_from_mo(X, W, R, kmesh, by_q=False):
-    return thc_df_ov_inner_from_mo(X, X, W, R, kmesh, by_q=by_q)
+def thc_df_inner_from_mo(X, W, R, kmesh, by_q=False, S=None):
+    return thc_df_ov_inner_from_mo(X, X, W, R, kmesh, by_q=by_q, S=S)
 
 
 @maybe_profile
-def thc_df_ov_error2_from_mo(Xo, Xv, W, R, kmesh, df_norm2, by_q=False):
+def thc_df_ov_error2_from_mo(Xo, Xv, W, R, kmesh, df_norm2, by_q=False, S=None):
     aa = thc_ovvo_inner_from_mo(Xo, Xv, W, Xo, Xv, W, kmesh, by_q=by_q).real
-    ab = thc_df_ov_inner_from_mo(Xo, Xv, W, R, kmesh, by_q=by_q).real
+    ab = thc_df_ov_inner_from_mo(Xo, Xv, W, R, kmesh, by_q=by_q, S=S).real
     return (aa + df_norm2 - 2.0 * ab).real
 
 
 @maybe_profile
-def thc_df_error2_from_mo(X, W, R, kmesh, df_norm2, by_q=False):
-    return thc_df_ov_error2_from_mo(X, X, W, R, kmesh, df_norm2, by_q=by_q)
+def thc_df_error2_from_mo(X, W, R, kmesh, df_norm2, by_q=False, S=None):
+    return thc_df_ov_error2_from_mo(X, X, W, R, kmesh, df_norm2, by_q=by_q, S=S)
 
 
 @maybe_profile
-def thc_df_ov_solve_w_intermediate_from_mo(Xo, Xv, R, kmesh, reg=None):
+def thc_df_ov_solve_w_intermediate_from_mo(Xo, Xv, R, kmesh, reg=None, S=None):
     A = thc_ovvo_build_Lbar(Xo, Xv, Xo, Xv, kmesh)
-    B = thc_df_ov_rhs_from_mo(Xo, Xv, R, kmesh)
+    B = thc_df_ov_rhs_from_mo(Xo, Xv, R, kmesh, S=S)
     W = torch_lstsq_oinv_PSD(A, B, reg=reg)
     return W, A, B
 
 
 @maybe_profile
-def thc_df_ov_solve_w_from_mo(Xo, Xv, R, kmesh, reg=None):
-    W, A, B = thc_df_ov_solve_w_intermediate_from_mo(Xo, Xv, R, kmesh, reg=reg)
+def thc_df_ov_solve_w_from_mo(Xo, Xv, R, kmesh, reg=None, S=None):
+    W, A, B = thc_df_ov_solve_w_intermediate_from_mo(Xo, Xv, R, kmesh, reg=reg, S=S)
     return W
 
 
 @maybe_profile
-def thc_df_solve_w_intermediate_from_mo(X, R, kmesh, reg=None):
+def thc_df_solve_w_intermediate_from_mo(X, R, kmesh, reg=None, S=None):
     A = thc_build_Lbar(X, X, kmesh)
-    B = thc_df_ov_rhs_from_mo(X, X, R, kmesh)
+    B = thc_df_ov_rhs_from_mo(X, X, R, kmesh, S=S)
     W = torch_lstsq_oinv_PSD(A, B, reg=reg)
     return W, A, B
 
 
 @maybe_profile
-def thc_df_solve_w_from_mo(X, R, kmesh, reg=None):
-    W, A, B = thc_df_solve_w_intermediate_from_mo(X, R, kmesh, reg=reg)
+def thc_df_solve_w_from_mo(X, R, kmesh, reg=None, S=None):
+    W, A, B = thc_df_solve_w_intermediate_from_mo(X, R, kmesh, reg=reg, S=S)
     return W
 
 
 @maybe_profile
-def thc_df_ov_solve_w_error2_from_mo(Xo, Xv, R, kmesh, df_norm2, reg=None):
-    W, A, B = thc_df_ov_solve_w_intermediate_from_mo(Xo, Xv, R, kmesh, reg=reg)
+def thc_df_ov_solve_w_error2_from_mo(Xo, Xv, R, kmesh, df_norm2, reg=None, S=None):
+    W, A, B = thc_df_ov_solve_w_intermediate_from_mo(Xo, Xv, R, kmesh, reg=reg, S=S)
     error2 = thc_solve_w_error2_from_intermediate(W, A, B, df_norm2)
     return W, error2
 
 
 @maybe_profile
-def thc_df_solve_w_error2_from_mo(X, R, kmesh, df_norm2, reg=None):
-    W, A, B = thc_df_solve_w_intermediate_from_mo(X, R, kmesh, reg=reg)
+def thc_df_solve_w_error2_from_mo(X, R, kmesh, df_norm2, reg=None, S=None):
+    W, A, B = thc_df_solve_w_intermediate_from_mo(X, R, kmesh, reg=reg, S=S)
     error2 = thc_solve_w_error2_from_intermediate(W, A, B, df_norm2)
     return W, error2
 
 
 @maybe_profile
-def df_inner_from_mo(R, kmesh, by_q=False):
+def df_inner_from_mo(R, kmesh, by_q=False, S=None):
+    # R in k1q layout; S[q, x] are the signs of a signed GDF
     nkpts = int(np.prod(kmesh))
     result = torch.zeros((nkpts,), dtype=R.dtype, device=R.device)
     for q in range(nkpts):
         M = torch.einsum("kxab,kyab->xy", R[:, q].conj(), R[:, q])
-        result[q] = torch.einsum("xy,xy->", M, M.conj())
+        if S is None:
+            result[q] = torch.einsum("xy,xy->", M, M.conj())
+        else:
+            s = S[q].to(dtype=R.dtype, device=R.device)
+            result[q] = torch.einsum("xy,x,y,xy->", M, s, s, M.conj())
     if by_q:
         return result
     return result.sum()

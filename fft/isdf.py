@@ -189,7 +189,9 @@ def select_interpolating_points(df_obj, cisdf=None):
     nao = cell.nao_nr()
     ov = df_obj.ov
     grids = df_obj.grids
-    ngrid = grids.coords.shape[0]
+    # optional explicit candidate points (e.g. a slab region for 2D) instead of the uniform grid
+    coords_all = grids.coords if df_obj.candidate_coords is None else df_obj.candidate_coords
+    ngrid = coords_all.shape[0]
 
     kpts = df_obj.kpts
     phase = get_phase_factor(cell, kpts)
@@ -197,6 +199,7 @@ def select_interpolating_points(df_obj, cisdf=None):
 
     ix = numpy.arange(ngrid)
     if ngrid > CHOLESKY_MAX_SIZE:
+        assert df_obj.candidate_coords is None
         max_memory = max(2000, df_obj.max_memory - current_memory()[0])
         blksize_max = int(max_memory * 1e6 * 0.5) // (nkpt * nao * 16)
         blksize_max = min(blksize_max, CHOLESKY_MAX_SIZE)
@@ -228,7 +231,7 @@ def select_interpolating_points(df_obj, cisdf=None):
         ix = ix[weight[ix] > CHOLESKY_TOL]
         ix = numpy.sort(ix)
     
-    coord = grids.coords[ix]
+    coord = coords_all[ix]
     phi_kpt = cell.pbc_eval_gto("GTOval", coord, kpts=kpts)
     phi_kpt = numpy.asarray(phi_kpt, dtype=numpy.complex128)
     if ov is None:
@@ -281,6 +284,7 @@ class InterpolativeSeparableDensityFitting(FFTDF):
         self._base_kern_kpt = None
         self.reg = 0.0
         self.ov = ov
+        self.candidate_coords = None
         _OPEN_ISDF_OBJECTS.add(self)
 
     def close(self):

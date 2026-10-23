@@ -35,6 +35,28 @@ def get_cholesky_mesh(mesh, max_size):
     return mesh1
 
 
+def get_slab_candidates(cell, max_size, margin):
+    # uniform grid restricted to the slab |z - z_atoms| <= margin (bohr, periodic in z), as fine as max_size allows
+    a = cell.lattice_vectors()
+    assert abs(a[0, 2]) < 1e-8 and abs(a[1, 2]) < 1e-8 and abs(a[2, 0]) < 1e-8 and abs(a[2, 1]) < 1e-8
+    Lz = a[2, 2]
+    z_atom = cell.atom_coords()[:, 2]
+    zc = z_atom[0]
+    dz_atom = (z_atom - zc + Lz / 2) % Lz - Lz / 2
+    z0 = dz_atom.min() - margin
+    z1 = dz_atom.max() + margin
+    area = abs(np.linalg.det(a[:2, :2]))
+    h = (area * (z1 - z0) / max_size) ** (1.0 / 3.0)
+    while True:
+        mesh = np.ceil(np.linalg.norm(a, axis=1) / h).astype(int)
+        coords = cell.get_uniform_grids(mesh)
+        dz = (coords[:, 2] - zc + Lz / 2) % Lz - Lz / 2
+        mask = (dz >= z0) & (dz <= z1)
+        if mask.sum() <= max_size:
+            return coords[mask], mesh
+        h *= 1.01
+
+
 def screen_gdf_tensor(R, eps_inv_half, kmesh):
     #R = torch.einsum("qyx,kqxab->kqyab", eps_inv_half, R)
     nkpts = R.shape[0]
@@ -73,6 +95,7 @@ parser.add_argument("--MP2", action='store_true')
 parser.add_argument("--screen", action='store_true')
 parser.add_argument("--ov", action='store_true')
 parser.add_argument("-cholesky_max", type=int, default=None)
+parser.add_argument("-slab_margin", type=float, default=4.0)
 args = parser.parse_args()
 
 system = args.system
@@ -111,6 +134,10 @@ assert utils.is_k_ordered(kpts_int, kmesh)
 cholesky_max = fft.isdf.CHOLESKY_MAX_SIZE if args.cholesky_max is None else args.cholesky_max
 fft.isdf.CHOLESKY_MAX_SIZE = cholesky_max
 cholesky_mesh = get_cholesky_mesh(cell.mesh, cholesky_max)
+# 2D: candidate interpolation points only in the slab region (vacuum points are wasted)
+slab_margin = args.slab_margin
+if cell.dimension == 2:
+    slab_coords, cholesky_mesh = get_slab_candidates(cell, cholesky_max, slab_margin / 0.52917721092)
 
 C = np.asarray(mf.mo_coeff)
 nkpts, nao, nmo = C.shape
@@ -127,6 +154,10 @@ print("cell.mesh      =", cell.mesh)
 print("cholesky mesh  =", cholesky_mesh)
 print("cholesky size  =", int(np.prod(cholesky_mesh)))
 print("cholesky max   =", cholesky_max)
+if cell.dimension == 2:
+    print("slab margin(A) =", slab_margin)
+    print("slab points    =", slab_coords.shape[0])
+    print("grid spacing(A)=", np.linalg.norm(cell.lattice_vectors(), axis=1) / cholesky_mesh * 0.52917721092)
 print("kmesh          =", kmesh)
 print("basis          =", basis)
 print("nao            =", nao)
@@ -143,6 +174,8 @@ print("")
 
 cell_isdf = cell.copy()
 cell_isdf.mesh = cholesky_mesh
+# ISDF points/vectors only need orbital values on the grid; for 2D the extra z images are negligible with a large vacuum
+cell_isdf.dimension = 3
 if use_ov:
     isdf = fft.ISDF(cell_isdf, kpts, ov=(Cocc, Cvir))
 else:
@@ -151,6 +184,8 @@ else:
     else:
         isdf = fft.ISDF(cell_isdf, kpts, ov=(C, C))
 isdf.verbose = 10
+if cell.dimension == 2:
+    isdf.candidate_coords = slab_coords
 X_ao = isdf.build_inpv_only(cisdf=c_isdf)
 
 complex_dtype = torch.complex128
@@ -160,8 +195,10 @@ Xv = torch.from_numpy(X_ao @ Cvir).to(dtype=complex_dtype)
 
 print("")
 print("Loading GDF tensor in AO k1k2 layout ...", flush=True)
-R_ao = utils.get_gdf_tensor_compact(mf.with_df, kpts_int, kmesh, progressbar=True, layout="k1k2")
+# signed GDF: 2D truncated Coulomb gives a negative auxiliary channel at q = 0
+R_ao, S = utils.get_gdf_tensor_compact(mf.with_df, kpts_int, kmesh, progressbar=True, layout="k1k2", signed=True)
 R_ao = torch.from_numpy(R_ao).to(dtype=complex_dtype)
+S = torch.from_numpy(S)
 if use_ov:
     print("Transforming GDF tensor AO -> OV ...", flush=True)
     Cocc_t = torch.from_numpy(Cocc).to(dtype=complex_dtype)
@@ -182,6 +219,7 @@ print("Converting GDF tensor k1k2 -> k1q ...", flush=True)
 R = k1k2_to_k1q(R, kpts_int, kmesh)
 
 if screen:
+    assert (S >= 0).all()
     print("Applying screening ...", flush=True)
     eps = np.load(screening_path)[:, 1:, 1:].copy()
     eps_inv_half = utils.matrix_power(eps, 0.5)
@@ -226,13 +264,13 @@ def scan_reg(A, B, df_norm2):
 
 
 if use_ov:
-    df_norm2 = utils.df_inner_from_mo(R_t, kmesh).real
+    df_norm2 = utils.df_inner_from_mo(R_t, kmesh, S=S).real
     A = utils.thc_ovvo_build_Lbar(Xo, Xv, Xo, Xv, kmesh)
-    B = utils.thc_df_ov_rhs_from_mo(Xo, Xv, R_t, kmesh)
+    B = utils.thc_df_ov_rhs_from_mo(Xo, Xv, R_t, kmesh, S=S)
 else:
-    df_norm2 = utils.df_inner_from_mo(R_t, kmesh).real
+    df_norm2 = utils.df_inner_from_mo(R_t, kmesh, S=S).real
     A = utils.thc_build_Lbar(X, X, kmesh)
-    B = utils.thc_df_ov_rhs_from_mo(X, X, R_t, kmesh)
+    B = utils.thc_df_ov_rhs_from_mo(X, X, R_t, kmesh, S=S)
 
 reg, W, error2 = scan_reg(A, B, df_norm2.to(dtype=real_dtype))
 
@@ -250,6 +288,8 @@ print("X norm    = %.16e" % np.linalg.svd(X_ao.reshape(nkpts * X_ao.shape[1], na
 print("W norm    = %.16e" % (np.abs(W_np).max()))
 
 if do_MP2:
+    # fft.ISDF builds its own (3D) Coulomb kernel
+    assert cell.dimension == 3
     mf_isdf = mf.copy()
     mf_isdf.with_df = fft.ISDF(cell, kpts)
     mf_isdf.with_df._isdf = chkfile

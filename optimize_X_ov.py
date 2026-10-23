@@ -70,10 +70,18 @@ def get_abs_norm_loss(X, W, force_complex128=False):
     else:
         norm_Xv = torch.linalg.svdvals(Xv).max()
     if W_Fnorm:
-        norm_W = torch.linalg.norm(W, dim=(1, 2)).max() / nkpts
+        norm_W = torch.linalg.norm(W, dim=(1, 2)).max()
     else:
-        norm_W = torch.linalg.eigvalsh(W).abs().max() / nkpts
-    return norm_Xo**2 * norm_Xv**2 * norm_W
+        norm_W = torch.linalg.eigvalsh(W).abs().max()
+    norm = norm_Xo**2 * norm_Xv**2 * norm_W
+    if rescale:
+        norm = norm / nkpts
+    return norm
+
+
+def get_loss(rel_error, norm_loss):
+    punishment = torch.cosh(rel_error / 1e-1)
+    return torch.log10(rel_error / 1e-2 + 1) + punishment - 1 + norm_loss * norm_ratio
 
 
 def print_header():
@@ -85,7 +93,6 @@ def print_header():
     print("nao            =", nao)
     print("nocc           =", nocc)
     print("nvir           =", nvir)
-    print("screen         =", screen)
     print("c_isdf         =", c_isdf)
     print("c_ref          =", c_ref)
     print("norm_const     =", norm_const)
@@ -116,6 +123,7 @@ def print_header():
 complex_dtype = torch.complex64
 #complex_dtype = torch.complex128
 real_dtype = torch.float32 if complex_dtype is torch.complex64 else torch.float64
+rescale = False
 
 parser = argparse.ArgumentParser()
 parser.add_argument("system")
@@ -133,10 +141,10 @@ parser.add_argument("-init_reg", type=float, default=1e-2)
 parser.add_argument("--Xo_colnorm", action="store_true")
 parser.add_argument("--Xv_colnorm", action="store_true")
 parser.add_argument("--W_Fnorm", action="store_true")
-parser.add_argument("--screen", action="store_true")
 parser.add_argument("--save", action="store_true")
 parser.add_argument("--symm", action="store_true")
 parser.add_argument("--real", action="store_true")
+parser.add_argument("--2d", dest="is_2d", action="store_true")
 args = parser.parse_args()
 
 if args.device is None:
@@ -146,7 +154,7 @@ else:
 
 system = args.system
 nk = args.nk
-kmesh = (nk, nk, nk)
+kmesh = (nk, nk, 1) if args.is_2d else (nk, nk, nk)
 klabel = system_common.get_klabel(kmesh)
 basis = args.basis
 suffix = args.suffix
@@ -158,8 +166,7 @@ norm_ratio = norm_const * nk**norm_power
 norm_label = "norm%sp%s" % (fmt_label(norm_const), fmt_label(norm_power))
 base_lr = args.base_lr
 nsteps_factor = args.nsteps_factor
-screen = args.screen
-screen_tag = "screen" if screen else "bare"
+screen_tag = "bare"
 state_AO = False
 use_symm = args.symm
 symm_tag = "_symm" if use_symm else ""
@@ -246,12 +253,9 @@ print_header()
 optimization_loss_args = (
     get_W_error2_from_X,
     get_abs_norm_loss,
+    get_loss,
     ref_norm2,
     ref_norm2_128,
-    norm_ratio,
-    1e-2,
-    1e-1,
-    False
 )
 (loss_opt, error2_opt, rel_error_opt, norm_loss_opt, W_opt, reg_opt), opt = optimize_X_common.run_adam(
     X_opt,

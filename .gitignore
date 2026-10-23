@@ -84,3 +84,16 @@ tmp/
 # IDEs
 .idea/
 .vscode/
+
+# Calculation data and outputs (never tracked)
+data*/
+log*/
+*.chk
+*.pkl
+*.npy
+*.npz
+*.h5
+*.png
+*.pdf
+*.lprof
+*.sw[op]

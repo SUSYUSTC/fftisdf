@@ -152,9 +152,11 @@ parser.add_argument("--verbose", action="store_true")
 parser.add_argument("--symm", action="store_true")
 parser.add_argument("--real", action="store_true")
 parser.add_argument("--convert", action="store_true")
-ov_group = parser.add_mutually_exclusive_group(required=True)
-ov_group.add_argument("-ov_ref", type=int, default=None)
-ov_group.add_argument("-ov_opt", default=None)
+thc_group = parser.add_mutually_exclusive_group(required=True)
+thc_group.add_argument("-ov_ref", type=int, default=None)
+thc_group.add_argument("-ov_opt", default=None)
+thc_group.add_argument("-full_ref", type=int, default=None)
+thc_group.add_argument("-full_opt", default=None)
 args = parser.parse_args()
 
 device = torch.device(f"cuda:{args.cuda}" if args.cuda is not None else "cpu")
@@ -169,9 +171,13 @@ real_tag = "_real" if args.real else ""
 dft_pkl = os.path.join(data_dir, f"DFT_{klabel}{symm_tag}.pkl")
 
 if args.ov_ref is not None:
-    ov_chk = os.path.join(data_dir, f"ISDFov_bareGDF{symm_tag}_{klabel}_c{args.ov_ref}.chk")
+    thc_chk = os.path.join(data_dir, f"ISDFov_bareGDF{symm_tag}_{klabel}_c{args.ov_ref}.chk")
+elif args.ov_opt is not None:
+    thc_chk = os.path.join(data_dir, f"ISDFov_opt_bareGDF{symm_tag}{real_tag}_{klabel}_{args.ov_opt}.chk")
+elif args.full_ref is not None:
+    thc_chk = os.path.join(data_dir, f"ISDFfull_bareGDF{symm_tag}_{klabel}_c{args.full_ref}.chk")
 else:
-    ov_chk = os.path.join(data_dir, f"ISDFov_opt_bareGDF{symm_tag}{real_tag}_{klabel}_{args.ov_opt}.chk")
+    thc_chk = os.path.join(data_dir, f"ISDFfull_opt_bareGDF{symm_tag}{real_tag}_{klabel}_{args.full_opt}.chk")
 
 with open(dft_pkl, "rb") as f:
     mf = pickle.load(f)
@@ -192,13 +198,15 @@ print("real", args.real)
 print("convert", args.convert)
 print("ov_ref", args.ov_ref)
 print("ov_opt", args.ov_opt)
+print("full_ref", args.full_ref)
+print("full_opt", args.full_opt)
 print("nocc", nocc, "nmo", mo_energy.shape[-1], "nkpts", len(mf.kpts))
 print("SCF energy", mf.e_tot)
 print("DFT pkl", dft_pkl)
-print("OV THC", ov_chk)
+print("THC", thc_chk)
 
 t0 = time.time()
-X, W = load_thc(ov_chk, C)
+X, W = load_thc(thc_chk, C)
 print("load THC time", time.time() - t0)
 print("nth", X.shape[1])
 
@@ -210,7 +218,7 @@ print("custom THC MP2 energy = %.16e" % emp2_custom.detach().cpu().numpy())
 if args.exact:
     mf_isdf = mf.copy()
     mf_isdf.with_df = fft.ISDF(mf.cell, mf.kpts)
-    mf_isdf.with_df._isdf = ov_chk
+    mf_isdf.with_df._isdf = thc_chk
     mf_isdf.with_df.build()
     pt = mp.KMP2(mf_isdf)
     pt.verbose = 0

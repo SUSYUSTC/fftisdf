@@ -126,12 +126,9 @@ def optimization_loss_from_X_log_reg(
     log_reg,
     get_W_error2_from_X,
     get_abs_norm_loss,
+    get_loss,
     ref_norm2,
     ref_norm2_128,
-    norm_ratio,
-    rel_error_scale,
-    cosh_scale,
-    cosh_sqrt=False,
     force_complex128=False,
 ):
     error2, rel_error, norm_loss, W, reg = objective_from_X_log_reg(
@@ -143,8 +140,7 @@ def optimization_loss_from_X_log_reg(
         ref_norm2_128,
         force_complex128=force_complex128,
     )
-    punishment = torch.cosh(torch.sqrt(rel_error / cosh_scale)) if cosh_sqrt else torch.cosh(rel_error / cosh_scale)
-    loss = torch.log10(rel_error / rel_error_scale + 1) + punishment - 1 + norm_loss * norm_ratio
+    loss = get_loss(rel_error, norm_loss)
     return loss, error2, rel_error, norm_loss, W, reg
 
 
@@ -223,6 +219,7 @@ def run_adam(
     complex_dtype,
     run_message,
     chk_tag,
+    update_loss=None,
 ):
     adam_steps = sum(nstep for nstep, _, _ in adam_schedule)
     lr_steps = np.cumsum([nstep for nstep, _, _ in adam_schedule])
@@ -250,9 +247,16 @@ def run_adam(
     print(run_message)
     best_loss = np.inf
     best_loss_complex128 = np.inf
+    loss_stage = None
     for istep in range(adam_steps + 1):
         istep_main = istep - nsteps_warmup
         adam_lr = opt.param_groups[0]["lr"]
+        if update_loss is not None:
+            loss_stage_new = update_loss(istep, adam_lr)
+            if loss_stage_new != loss_stage:
+                best_loss = np.inf
+                best_loss_complex128 = np.inf
+                loss_stage = loss_stage_new
         timer_sync(device)
         time0 = time.perf_counter()
 

@@ -6,6 +6,7 @@ import numpy as np
 import pyscf
 pyscf.scf.hf.remove_overlap_zero_eigenvalue = False
 from pyscf.pbc import scf, df
+import pyscf.pbc.df.rsdf_builder
 import system_common
 
 
@@ -29,6 +30,10 @@ print('overlap min eigval', np.linalg.eigvalsh(cell.pbc_intor("int1e_ovlp")).min
 xc = system_common.load_xc(system, basis, suffix=suffix)
 exxdiv = system_common.load_setting(system, basis, "exxdiv", suffix=suffix)
 conv_tol = system_common.load_setting(system, basis, "conv_tol", suffix=suffix)
+# eigen-decompose j2c at every q (drop linear dependence) instead of Cholesky, which can "succeed"
+# on an ill-conditioned j2c at some q and amplify noise
+j2c_eig_always = system_common.load_section_setting(system, basis, "gdf", "j2c_eig_always", suffix=suffix, default=False)
+pyscf.pbc.df.rsdf_builder._RSGDFBuilder.j2c_eig_always = j2c_eig_always
 
 kpts = cell.make_kpts(kmesh)
 kpts_int = np.round(cell.get_scaled_kpts(kpts) * kmesh).astype(int) % kmesh
@@ -64,6 +69,7 @@ print("XC =", xc, flush=True)
 print("exxdiv =", exxdiv, flush=True)
 print("conv_tol =", mf.conv_tol, flush=True)
 print("GDF chkfile =", gdf_chk, flush=True)
+print("j2c_eig_always =", j2c_eig_always, flush=True)
 print("Running SCF ...", flush=True)
 mf.kernel()
 print('min mo energy', np.asarray(mf.mo_energy).min())

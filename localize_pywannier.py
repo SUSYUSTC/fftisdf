@@ -63,7 +63,7 @@ def run_w90_part(mf, kmesh, p0, p1, name, projections=None):
         C_opt = mo[:, win] @ w90.U_matrix_opt[k][:, win].T
         C_tilde = C_opt @ w90.U_matrix[k].T
         C_k.append(C_tilde)
-    return np.asarray(C_k)
+    return np.asarray(C_k), np.asarray(w90.wann_centres), np.asarray(w90.wann_spreads)
 
 
 def check_s_orthonormal(cell, kpts, C, name):
@@ -81,24 +81,30 @@ parser.add_argument("ky", type=int)
 parser.add_argument("kz", type=int)
 parser.add_argument("basis")
 parser.add_argument("-suffix", default=None)
+parser.add_argument("--hf", action="store_true")
 args = parser.parse_args()
 
 system = args.system
 kmesh = (args.kx, args.ky, args.kz)
 basis = args.basis
 suffix = args.suffix
+hf = args.hf
 klabel = system_common.get_klabel(kmesh)
 data_dir = system_common.get_data_dir(system, basis, suffix=suffix)
-dft_pkl = os.path.join(data_dir, f"DFT_{klabel}.pkl")
-save_path = os.path.join(data_dir, f"Clocal_pywannier_{klabel}.npy")
+method = "HF" if hf else "DFT"
+mf_pkl = os.path.join(data_dir, f"{method}_{klabel}.pkl")
+name = "Clocal_pywannier_HF" if hf else "Clocal_pywannier"
+save_path = os.path.join(data_dir, f"{name}_{klabel}.npy")
 
-with open(dft_pkl, "rb") as f:
+with open(mf_pkl, "rb") as f:
     mf = pickle.load(f)
 
 projections = system_common.load_section_setting(
     system, basis, "wannier", "occ_projections", suffix=suffix,
 )
-os.chdir(data_dir)
+work_dir = os.path.join(data_dir, f"wannier_occproj2_{method}_{klabel}")
+os.makedirs(work_dir, exist_ok=True)
+os.chdir(work_dir)
 
 cell = mf.cell
 C = np.asarray(mf.mo_coeff)
@@ -111,12 +117,15 @@ print(f"system = {system}")
 print(f"kmesh = {klabel}")
 print(f"basis = {basis}")
 print(f"suffix = {suffix}")
+print(f"method = {method}")
 print(f"data_dir = {data_dir}")
 print(f"nao = {cell.nao_nr()}, nmo = {nmo}, nocc = {nocc}, nvir = {nmo - nocc}")
 print(f"nocc by k = {nocc_all}")
 print(f"occupied projections = {projections}")
 
-C_occ = run_w90_part(mf, kmesh, 0, nocc, "occ", projections=projections)
+C_occ, centres_occ, spreads_occ = run_w90_part(
+    mf, kmesh, 0, nocc, "occ", projections=projections,
+)
 C_vir = C[:, :, nocc:]
 
 print("")
@@ -126,6 +135,8 @@ check_s_orthonormal(cell, mf.kpts, C_vir, "vir")
 data = {
     "occ": C_occ,
     "vir": C_vir,
+    "centres_occ": centres_occ,
+    "spreads_occ": spreads_occ,
     "layout": "k2q",
 }
 np.save(save_path, data)

@@ -66,6 +66,11 @@ def get_abs_norm_loss(X, W, force_complex128=False):
     return norm_X**4 * norm_W
 
 
+def get_loss(rel_error, norm_loss):
+    punishment = torch.cosh(torch.sqrt(rel_error / 1e-2))
+    return torch.log10(rel_error / 1e-3 + 1) + punishment - 1 + norm_loss * norm_ratio
+
+
 def print_header():
     print("cell.ke_cutoff =", cell.ke_cutoff)
     print("cell.mesh      =", cell.mesh)
@@ -102,10 +107,10 @@ def print_header():
     print("")
 
 
-complex_dtype = torch.complex64
-#complex_dtype = torch.complex128
+#complex_dtype = torch.complex64
+complex_dtype = torch.complex128
 real_dtype = torch.float32 if complex_dtype is torch.complex64 else torch.float64
-fit_AO = True
+fit_AO = False
 state_AO = False
 init_reg = 1e-2
 
@@ -124,6 +129,7 @@ parser.add_argument("--screen", action="store_true")
 parser.add_argument("--save", action="store_true")
 parser.add_argument("--symm", action="store_true")
 parser.add_argument("--real", action="store_true")
+parser.add_argument("--2d", dest="is_2d", action="store_true")
 args = parser.parse_args()
 
 if args.device is None:
@@ -133,7 +139,7 @@ else:
 
 system = args.system
 nk = args.nk
-kmesh = (nk, nk, nk)
+kmesh = (nk, nk, 1) if args.is_2d else (nk, nk, nk)
 klabel = system_common.get_klabel(kmesh)
 basis = args.basis
 suffix = args.suffix
@@ -142,6 +148,7 @@ c_ref = args.c_ref
 norm_const = args.norm_const
 norm_ratio = norm_const
 norm_label = "norm%s" % fmt_label(norm_const)
+fit_tag = "" if fit_AO else "_fitMO"
 base_lr = args.base_lr
 nsteps_factor = args.nsteps_factor
 screen = args.screen
@@ -155,8 +162,8 @@ data_dir = system_common.get_data_dir(system, basis, suffix=suffix)
 dft_pkl = os.path.join(data_dir, f"DFT_{klabel}{symm_tag}.pkl")
 init_chk = os.path.join(data_dir, f"ISDFfull_{screen_tag}GDF{symm_tag}_{klabel}_c{c_isdf}.chk")
 ref_chk = os.path.join(data_dir, f"ISDFfull_{screen_tag}GDF{symm_tag}_{klabel}_c{c_ref}.chk")
-opt_save_path = os.path.join(data_dir, f"opt_X_full_{screen_tag}GDF{symm_tag}{real_tag}_{klabel}_c{c_isdf}_cref{c_ref}_{norm_label}.pt")
-chk_save_path = os.path.join(data_dir, f"ISDFfull_opt_{screen_tag}GDF{symm_tag}{real_tag}_{klabel}_c{c_isdf}_cref{c_ref}_{norm_label}.chk")
+opt_save_path = os.path.join(data_dir, f"opt_X_full_{screen_tag}GDF{fit_tag}{symm_tag}{real_tag}_{klabel}_c{c_isdf}_cref{c_ref}_{norm_label}.pt")
+chk_save_path = os.path.join(data_dir, f"ISDFfull_opt_{screen_tag}GDF{fit_tag}{symm_tag}{real_tag}_{klabel}_c{c_isdf}_cref{c_ref}_{norm_label}.chk")
 
 if args.save:
     print("Optimization result will be saved to", opt_save_path)
@@ -220,12 +227,9 @@ print_header()
 optimization_loss_args = (
     get_W_error2_from_X,
     get_abs_norm_loss,
+    get_loss,
     ref_norm2,
     ref_norm2_128,
-    norm_ratio,
-    1e-3,
-    1e-2,
-    True,
 )
 (loss_opt, error2_opt, rel_error_opt, norm_loss_opt, W_opt, reg_opt), opt = optimize_X_common.run_adam(
     X_opt,
@@ -247,15 +251,37 @@ if use_symm:
     X_ao_opt = libsymm.symmetrize_isdf_X_fast(symm, X_ao_opt, perm, phase)
     W_symm = libsymm.symmetrize_isdf_W_fast(symm, W_save, perm, phase)
     W_symm_err = torch.linalg.norm(W_symm - W_save) / torch.linalg.norm(W_save)
+    W_save = W_symm
 if use_real:
     X_ao_opt = optimize_X_common.symmetrize_real_gauge(X_ao_opt, negative)
     W_save = optimize_X_common.symmetrize_real_gauge(W_save, negative)
+
+X_mo_ref128 = X_ref_ao128 @ C128
+X_mo_opt128 = X_ao_opt.to(dtype=torch.complex128) @ C128
+nocc = cell.nelectron // 2
+Xo_ref128 = X_mo_ref128[:, :, :nocc]
+Xv_ref128 = X_mo_ref128[:, :, nocc:]
+Xo_opt128 = X_mo_opt128[:, :, :nocc]
+Xv_opt128 = X_mo_opt128[:, :, nocc:]
+ovvo_ref_norm2 = utils.thc_ovvo_inner_from_mo(
+    Xo_ref128, Xv_ref128, W_ref128,
+    Xo_ref128, Xv_ref128, W_ref128,
+    kmesh,
+).real
+ovvo_error2 = utils.thc_ovvo_error2_from_mo(
+    Xo_ref128, Xv_ref128, W_ref128,
+    Xo_opt128, Xv_opt128, W_save.to(dtype=torch.complex128),
+    kmesh,
+).real
+ovvo_rel_error = torch.sqrt(ovvo_error2 / ovvo_ref_norm2)
 
 print("final loss      = %.16e" % loss_opt.item())
 print("final error2    = %.16e" % error2_opt.item())
 print("final rel_error = %.16e" % rel_error_opt.item())
 print("final norm_loss = %.16e" % norm_loss_opt.item())
 print("final reg       = %.16e" % reg_opt.item())
+print("final ovvo error2    = %.16e" % ovvo_error2.item())
+print("final ovvo rel_error = %.16e" % ovvo_rel_error.item())
 if use_symm:
     print("final W symm err = %.16e" % W_symm_err.item())
 
