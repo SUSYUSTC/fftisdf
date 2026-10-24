@@ -13,7 +13,7 @@ PYSCF_MAX_MEMORY = int(os.environ.get("PYSCF_MAX_MEMORY", 2000))
 def kpts_to_kmesh(cell, kpts): # do I really need this function?
     if not isinstance(kpts, numpy.ndarray):
         kpts = numpy.asarray(kpts.kpts)
-    kmesh = pbctools.k2gamma.kpts_to_kmesh(cell, kpts - kpts[0])
+    kmesh = pbctools.k2gamma.kpts_to_kmesh(cell, kpts - kpts[0], bound_by_supmol=False)
     return kpts, kmesh
 
 def get_phase_factor(cell, kpts):
@@ -27,7 +27,7 @@ def get_phase_factor(cell, kpts):
         kpts = numpy.asarray(kpts.kpts)
     
     # obtain kmesh
-    kmesh = pbctools.k2gamma.kpts_to_kmesh(cell, kpts - kpts[0])
+    kmesh = pbctools.k2gamma.kpts_to_kmesh(cell, kpts - kpts[0], bound_by_supmol=False)
     
     # check if kpts come from wrap_around
     is_wrap_around = numpy.allclose(kpts, cell.get_kpts(kmesh, wrap_around=True))
