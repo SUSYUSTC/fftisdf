@@ -265,6 +265,7 @@ def solve_w_error2_with_AB(A, B, df_norm2, reg):
 def scan_reg(A, B, df_norm2):
     reg = reg0
     accepted = None
+    best = None
     if use_abs:
         rel_error0 = 1
     else:
@@ -285,17 +286,19 @@ def scan_reg(A, B, df_norm2):
         )
         if use_abs:
             # strict absolute threshold: keep the largest reg whose rel_error stays below factor
+            if not torch.isnan(rel_error) and (best is None or rel_error < best[0]):
+                best = (rel_error, (reg, W, error2))
             if rel_error < factor:
                 accepted = (reg, W, error2)
-            elif accepted is not None:
+            elif accepted is not None or (best is not None and rel_error > 2 * best[0]):
                 break
         elif ireg > 0 and rel_error >= factor * rel_error0:
             return reg, W, error2
         reg *= 2.0
     if use_abs:
         if accepted is None:
-            print("WARNING: rel_error never below the absolute threshold %.3e" % factor, flush=True)
-            return reg, W, error2
+            print("WARNING: rel_error never below the absolute threshold %.3e, keep the smallest error" % factor, flush=True)
+            return best[1]
         return accepted
     return reg, W, error2
 
