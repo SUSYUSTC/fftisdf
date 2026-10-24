@@ -34,6 +34,8 @@ conv_tol = system_common.load_setting(system, basis, "conv_tol", suffix=suffix)
 # on an ill-conditioned j2c at some q and amplify noise
 j2c_eig_always = system_common.load_section_setting(system, basis, "gdf", "j2c_eig_always", suffix=suffix, default=False)
 pyscf.pbc.df.rsdf_builder._RSGDFBuilder.j2c_eig_always = j2c_eig_always
+# eigenvalues of j2c below this are dropped (PySCF default 1e-10); near-zero ones amplify 3c-integral noise
+linear_dep_threshold = system_common.load_section_setting(system, basis, "gdf", "linear_dep_threshold", suffix=suffix, default=None)
 
 kpts = cell.make_kpts(kmesh)
 kpts_int = np.round(cell.get_scaled_kpts(kpts) * kmesh).astype(int) % kmesh
@@ -49,6 +51,8 @@ gdf_chk = os.path.join(data_dir, f"GDF_{klabel}.chk")
 def make_gdf():
     with_df = df.GDF(cell, kpts)
     with_df.verbose = 0
+    if linear_dep_threshold is not None:
+        with_df.linear_dep_threshold = linear_dep_threshold
     if os.path.exists(gdf_chk):
         print("Loading GDF cache =", gdf_chk, flush=True)
         with_df._cderi = gdf_chk
@@ -70,6 +74,7 @@ print("exxdiv =", exxdiv, flush=True)
 print("conv_tol =", mf.conv_tol, flush=True)
 print("GDF chkfile =", gdf_chk, flush=True)
 print("j2c_eig_always =", j2c_eig_always, flush=True)
+print("linear_dep_threshold =", linear_dep_threshold, flush=True)
 print("Running SCF ...", flush=True)
 mf.kernel()
 print('min mo energy', np.asarray(mf.mo_energy).min())

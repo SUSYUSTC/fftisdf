@@ -264,6 +264,7 @@ def solve_w_error2_with_AB(A, B, df_norm2, reg):
 
 def scan_reg(A, B, df_norm2):
     reg = reg0
+    accepted = None
     if use_abs:
         rel_error0 = 1
     else:
@@ -282,9 +283,20 @@ def scan_reg(A, B, df_norm2):
             % (ireg, reg, rel_error.detach().cpu().numpy(), (rel_error / rel_error0).detach().cpu().numpy()),
             flush=True,
         )
-        if ireg > 0 and rel_error >= factor * rel_error0:
+        if use_abs:
+            # strict absolute threshold: keep the largest reg whose rel_error stays below factor
+            if rel_error < factor:
+                accepted = (reg, W, error2)
+            elif accepted is not None:
+                break
+        elif ireg > 0 and rel_error >= factor * rel_error0:
             return reg, W, error2
         reg *= 2.0
+    if use_abs:
+        if accepted is None:
+            print("WARNING: rel_error never below the absolute threshold %.3e" % factor, flush=True)
+            return reg, W, error2
+        return accepted
     return reg, W, error2
 
 
