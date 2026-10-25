@@ -287,16 +287,20 @@ def get_gdf_tensor_compact(gdf, kpts_int, kmesh, C1=None, C2=None, *, layout, pr
     return R
 
 
-def load_gdf_ao_k1k2(cderi, kpts, nao, label="j3c"):
-    '''
-    Full AO GDF tensor V[k1, k2, L, p, q] (naux zero-padded to the max over q) from a pyscf (>= 2.1) cderi file,
-    same values as get_gdf_tensor_compact(C1=None, C2=None, layout="k1k2").
-    Every dataset j3c/{k1*Nk+k2}/{seg} is read exactly once with low-level h5py calls; the aosym='s2' blocks
-    (k1 != k2: lower triangle of (k1, k2) plus lower triangle of (k2, k1)) are unpacked afterwards with the pyscf C routine.
-    The pyscf loader instead reads both datasets for every block, with several Python-level h5py calls per block.
+def load_gdf_k1k2(cderi, kpts, nao, C=None, label="j3c"):
+    """
+    GDF tensor in the k1k2 layout from a pyscf (>= 2.1) cderi file, rows [positive, negative, zero padding]
+    with signs S[k1, k2, L] = +1, -1, 0: every contraction over L of two factors carries the weight S
+    (the negative channel 'j3c-', 2D truncated Coulomb at q = 0, is appended after the positive rows).
+    C=None: returns (V, S), V[k1, k2, L, p, q] the AO tensor (numpy), same values as get_gdf_tensor_compact(layout="k1k2").
+    C=[(C1, C2, diag), ...]: returns ([B, ...], S) with B[k1, k2, L, i, j] = C1[k1]^dagger V[k1, k2] C2[k2] (torch),
+    or only the k1 = k2 blocks B[k, L, i, j] if diag; the AO tensor is never stored, blocks are transformed nkpts at a time.
+    Every dataset is read exactly once with low-level h5py calls; the aosym='s2' blocks (k1 != k2: lower triangle of
+    (k1, k2) plus lower triangle of (k2, k1)) are read and unpacked pairwise with the pyscf C routine.
     kpts: k-points of the GDF object (checked against the file); V is indexed in this order.
-    '''
+    """
     nkpts = len(kpts)
+    libpbc = lib.load_library("libpbc")
     with h5py.File(cderi, "r") as f:
         assert np.allclose(f["kpts"][()], kpts)
         aosym = f["aosym"][()]
@@ -304,45 +308,106 @@ def load_gdf_ao_k1k2(cderi, kpts, nao, label="j3c"):
             aosym = aosym.decode()
         # low-level h5py handles: the high-level Group/Dataset objects cost more than the read itself for small blocks
         fid = f.id
-        raw = []
-        for key in range(nkpts * nkpts):
+        has_neg = (label + "-") in f
+
+        def read(name):
             segs = []
-            for iseg in range(h5py.h5g.open(fid, f"{label}/{key}".encode()).get_num_objs()):
-                dset = h5py.h5d.open(fid, f"{label}/{key}/{iseg}".encode())
+            for iseg in range(h5py.h5g.open(fid, name.encode()).get_num_objs()):
+                dset = h5py.h5d.open(fid, f"{name}/{iseg}".encode())
                 buf = np.empty(dset.shape, dtype=dset.dtype)
                 dset.read(h5py.h5s.ALL, h5py.h5s.ALL, buf)
                 segs.append(buf)
-            raw.append(segs[0] if len(segs) == 1 else np.hstack(segs))
-    naux = max(x.shape[0] for x in raw)
-    V = np.zeros((nkpts, nkpts, naux, nao, nao), dtype=np.complex128)
-    libpbc = lib.load_library("libpbc")
-    for k1 in range(nkpts):
-        for k2 in range(nkpts):
-            tril = raw[k1 * nkpts + k2]
-            if aosym == "s1" or k1 == k2:
-                if tril.shape[1] == nao * (nao + 1) // 2:
-                    V[k1, k2, :tril.shape[0]] = lib.unpack_tril(tril)
-                else:
-                    V[k1, k2, :tril.shape[0]] = tril.reshape(-1, nao, nao)
-            else:
+            return segs[0] if len(segs) == 1 else np.hstack(segs)
+
+        def read_signed(k1, k2):
+            key = k1 * nkpts + k2
+            if nneg[k1, k2] == 0:
+                return read(f"{label}/{key}")
+            return np.vstack([read(f"{label}/{key}"), read(f"{label}-/{key}")])
+
+        # row counts per block (the shapes only, no data)
+        npos = np.zeros((nkpts, nkpts), dtype=int)
+        nneg = np.zeros((nkpts, nkpts), dtype=int)
+        for k1 in range(nkpts):
+            for k2 in range(nkpts):
+                npos[k1, k2] = f[f"{label}/{k1 * nkpts + k2}/0"].shape[0]
+                if has_neg and f"{k1 * nkpts + k2}" in f[label + "-"]:
+                    nneg[k1, k2] = f[f"{label}-/{k1 * nkpts + k2}/0"].shape[0]
+        naux = int((npos + nneg).max())
+        S = np.zeros((nkpts, nkpts, naux))
+        for k1 in range(nkpts):
+            for k2 in range(nkpts):
+                S[k1, k2, :npos[k1, k2]] = 1.0
+                S[k1, k2, npos[k1, k2]:npos[k1, k2] + nneg[k1, k2]] = -1.0
+
+        if C is None:
+            V = np.zeros((nkpts, nkpts, naux, nao, nao), dtype=np.complex128)
+        else:
+            C = [(torch.from_numpy(np.ascontiguousarray(C1)), torch.from_numpy(np.ascontiguousarray(C2)), diag) for C1, C2, diag in C]
+            V = [torch.zeros(((nkpts,) if diag else (nkpts, nkpts)) + (naux, C1.shape[2], C2.shape[2]), dtype=torch.complex128) for C1, C2, diag in C]
+            # AO blocks are buffered and transformed nkpts at a time (one small transform per block is ~2x slower overall)
+            buf = np.empty((nkpts, naux, nao, nao), dtype=np.complex128)
+            kbuf = []
+
+        def flush():
+            k1s, k2s = torch.tensor([k[0] for k in kbuf]), torch.tensor([k[1] for k in kbuf])
+            Vb = torch.from_numpy(buf[:len(kbuf)])
+            for (C1, C2, diag), B in zip(C, V):
+                if not diag:
+                    B[k1s, k2s] = C1[k1s].conj().transpose(1, 2)[:, None] @ Vb @ C2[k2s][:, None]
+                elif (k1s == k2s).any():
+                    m = k1s == k2s
+                    B[k1s[m]] = C1[k1s[m]].conj().transpose(1, 2)[:, None] @ Vb[m] @ C2[k2s[m]][:, None]
+            kbuf.clear()
+
+        def block(k1, k2):
+            if C is None:
+                return V[k1, k2]
+            if len(kbuf) >= nkpts:
+                flush()
+            kbuf.append((k1, k2))
+            return buf[len(kbuf) - 1]
+
+        for k1 in range(nkpts):
+            for k2 in range(k1, nkpts):
+                tril = read_signed(k1, k2)
+                nrow = tril.shape[0]
+                if aosym == "s1" or k1 == k2:
+                    out = block(k1, k2)
+                    out[nrow:] = 0
+                    if tril.shape[1] == nao * (nao + 1) // 2:
+                        out[:nrow] = lib.unpack_tril(tril)
+                    else:
+                        out[:nrow] = tril.reshape(-1, nao, nao)
+                    if k1 != k2:
+                        triu = read_signed(k2, k1)
+                        out = block(k2, k1)
+                        out[triu.shape[0]:] = 0
+                        out[:triu.shape[0]] = triu.reshape(-1, nao, nao)
+                    continue
                 tril = np.asarray(tril, dtype=np.complex128, order="C")
-                triu = np.asarray(raw[k2 * nkpts + k1], dtype=np.complex128, order="C")
+                triu = np.asarray(read_signed(k2, k1), dtype=np.complex128, order="C")
                 assert triu.shape == tril.shape
-                libpbc.PBCunpack_tril_triu(V[k1, k2].ctypes.data_as(ctypes.c_void_p), tril.ctypes.data_as(ctypes.c_void_p),
-                                           triu.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(tril.shape[0]), ctypes.c_int(nao))
-    return V
+                for ka, kb, lo, up in [(k1, k2, tril, triu), (k2, k1, triu, tril)]:
+                    out = block(ka, kb)
+                    out[nrow:] = 0
+                    libpbc.PBCunpack_tril_triu(out.ctypes.data_as(ctypes.c_void_p), lo.ctypes.data_as(ctypes.c_void_p),
+                                               up.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(nrow), ctypes.c_int(nao))
+        if C is not None and kbuf:
+            flush()
+    return V, S
 
 
-def make_fast_get_jk(mydf, V):
+def make_fast_get_jk(mydf, V, S):
     '''
     Returns a drop-in replacement of mydf.get_jk (same signature) that keeps the whole GDF tensor in memory,
-    usage: mydf.get_jk = make_fast_get_jk(mydf, load_gdf_ao_k1k2(cderi, mydf.kpts, mydf.cell.nao_nr()))
-    V: AO GDF tensor V[k1, k2, L, p, q] in the k1k2 layout, k-points in the order of mydf.kpts;
-    it is reordered in place to V[k1, k2, r, L, q], so do not use V afterwards.
-    Same formulas as pyscf.pbc.df.df_jk.get_j_kpts / get_k_kpts:
-        rho[x, L] = 1/Nk sum_k sum_pq V[k, k, L, p, q] D[x, k, q, p],  J[x, k] = sum_L rho[x, L] V[k, k, L]
-        K[x, k2, p, q] = 1/Nk sum_k1 sum_L sum_rs conj(V[k1, k2, L, s, p]) D[x, k1, s, r] V[k1, k2, L, r, q]
-    K uses the SVD D = U S Vh truncated to its numerical rank (rank n_occ for HF and CIS).
+    usage: mydf.get_jk = make_fast_get_jk(mydf, *load_gdf_k1k2(cderi, mydf.kpts, mydf.cell.nao_nr()))
+    V, S: AO GDF tensor V[k1, k2, L, p, q] in the k1k2 layout and its signs S[k1, k2, L] (load_gdf_k1k2),
+    k-points in the order of mydf.kpts; V is reordered in place to V[k1, k2, r, L, q], so do not use V afterwards.
+    Same formulas as pyscf.pbc.df.df_jk.get_j_kpts / get_k_kpts (with the 2D negative channel):
+        rho[x, L] = 1/Nk sum_k sum_pq V[k, k, L, p, q] D[x, k, q, p],  J[x, k] = sum_L S[k, k, L] rho[x, L] V[k, k, L]
+        K[x, k2, p, q] = 1/Nk sum_k1 sum_L S[k1, k2, L] sum_rs conj(V[k1, k2, L, s, p]) D[x, k1, s, r] V[k1, k2, L, r, q]
+    K uses the SVD D = U sv Vh truncated to its numerical rank (rank n_occ for HF and CIS).
     Anything else (omega, kpts_band, other kpts) falls back to the original pyscf get_jk.
     '''
     from pyscf.pbc.df import df_jk
@@ -353,6 +418,8 @@ def make_fast_get_jk(mydf, V):
     nk = len(kpts0)
     assert V.shape[:2] == (nk, nk)
     Vkk = V[np.arange(nk), np.arange(nk)]
+    Skk = S[0, 0]
+    assert np.allclose(S[np.arange(nk), np.arange(nk)], Skk)
     nao = V.shape[-1]
     naux = V.shape[2]
     # in-place reorder to Vt[k1, k2, r, (L, q)] = V[k1, k2, L, r, q] so that K is a few large GEMMs
@@ -368,12 +435,12 @@ def make_fast_get_jk(mydf, V):
         nset = dms.shape[0]
         vj = vk = None
         if with_j:
-            rho = np.einsum("kLpq,xkqp->xL", Vkk, dms) / nk
+            rho = np.einsum("kLpq,xkqp->xL", Vkk, dms) * Skk / nk
             vj = df_jk._format_jks(np.einsum("xL,kLpq->xkpq", rho, Vkk), dm_kpts, None, kpts0)
         if with_k:
-            U, S, Vh = np.linalg.svd(dms)
-            rank = max(1, int((S > S.max() * 1e-14).sum(axis=-1).max()))
-            US = U[..., :rank] * S[..., None, :rank]
+            U, sv, Vh = np.linalg.svd(dms)
+            rank = max(1, int((sv > sv.max() * 1e-14).sum(axis=-1).max()))
+            US = U[..., :rank] * sv[..., None, :rank]
             # rows [conj(US)^T; Vh] for all sets: A[k1, (x, 2, i), s]
             A = np.stack([US.conj().swapaxes(-1, -2), Vh[..., :rank, :]], axis=2)
             A = A.transpose(1, 0, 2, 3, 4).reshape(nk, nset * 2 * rank, nao)
@@ -381,6 +448,7 @@ def make_fast_get_jk(mydf, V):
             for k2 in range(nk):
                 # W1c[i, (L, p)] = sum_s conj(US[s, i]) V[L, s, p],  W2[i, (L, q)] = sum_r Vh[i, r] V[L, r, q]
                 W = np.matmul(A, Vt[:, k2]).reshape(nk, nset, 2, rank, naux, nao)
+                W[:, :, 1] *= S[:, k2][:, None, None, :, None]
                 W1c = W[:, :, 0].transpose(1, 0, 2, 3, 4).reshape(nset, -1, nao)
                 W2 = W[:, :, 1].transpose(1, 0, 2, 3, 4).reshape(nset, -1, nao)
                 # K[p, q] = sum_{k1, i, L} conj(W1c[i, p]) W2[i, q]
