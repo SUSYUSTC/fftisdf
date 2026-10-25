@@ -492,10 +492,11 @@ def fourier_transform_3d(tensor, *, axis, kmesh, inverse):
     tensor = tensor.movedim(axis, 0)
     tensor = tensor.reshape(kmesh + tensor.shape[1:])
     if use_fast_fft:
+        # same convention as get_one_phase: inverse=False is exp(+ikR) (ifftn), inverse=True is exp(-ikR) (fftn)
         if inverse:
-            tensor = torch.fft.ifftn(tensor, dim=tuple(range(len(kmesh))), norm='ortho')
-        else:
             tensor = torch.fft.fftn(tensor, dim=tuple(range(len(kmesh))), norm='ortho')
+        else:
+            tensor = torch.fft.ifftn(tensor, dim=tuple(range(len(kmesh))), norm='ortho')
     else:
         phase_all = [get_one_phase(n).to(dtype=tensor.dtype, device=tensor.device) for n in kmesh]
         if inverse:
