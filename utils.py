@@ -1,4 +1,6 @@
+import ctypes
 import functools
+import h5py
 import numpy as np
 import torch
 import builtins
@@ -285,16 +287,62 @@ def get_gdf_tensor_compact(gdf, kpts_int, kmesh, C1=None, C2=None, *, layout, pr
     return R
 
 
-def make_fast_get_jk(mydf, kmesh, gdf_path=None):
+def load_gdf_ao_k1k2(cderi, kpts, nao, label="j3c"):
     '''
-    Returns a drop-in replacement of mydf.get_jk (same signature) that keeps the whole GDF tensor
-    V[k1, k2, L, p, q] in memory, usage: mydf.get_jk = make_fast_get_jk(mydf, kmesh, gdf_path)
-    gdf_path: GDF file to load from (e.g. a copy in /dev/shm), default mydf._cderi
+    Full AO GDF tensor V[k1, k2, L, p, q] (naux zero-padded to the max over q) from a pyscf (>= 2.1) cderi file,
+    same values as get_gdf_tensor_compact(C1=None, C2=None, layout="k1k2").
+    Every dataset j3c/{k1*Nk+k2}/{seg} is read exactly once with low-level h5py calls; the aosym='s2' blocks
+    (k1 != k2: lower triangle of (k1, k2) plus lower triangle of (k2, k1)) are unpacked afterwards with the pyscf C routine.
+    The pyscf loader instead reads both datasets for every block, with several Python-level h5py calls per block.
+    kpts: k-points of the GDF object (checked against the file); V is indexed in this order.
+    '''
+    nkpts = len(kpts)
+    with h5py.File(cderi, "r") as f:
+        assert np.allclose(f["kpts"][()], kpts)
+        aosym = f["aosym"][()]
+        if isinstance(aosym, bytes):
+            aosym = aosym.decode()
+        # low-level h5py handles: the high-level Group/Dataset objects cost more than the read itself for small blocks
+        fid = f.id
+        raw = []
+        for key in range(nkpts * nkpts):
+            segs = []
+            for iseg in range(h5py.h5g.open(fid, f"{label}/{key}".encode()).get_num_objs()):
+                dset = h5py.h5d.open(fid, f"{label}/{key}/{iseg}".encode())
+                buf = np.empty(dset.shape, dtype=dset.dtype)
+                dset.read(h5py.h5s.ALL, h5py.h5s.ALL, buf)
+                segs.append(buf)
+            raw.append(segs[0] if len(segs) == 1 else np.hstack(segs))
+    naux = max(x.shape[0] for x in raw)
+    V = np.zeros((nkpts, nkpts, naux, nao, nao), dtype=np.complex128)
+    libpbc = lib.load_library("libpbc")
+    for k1 in range(nkpts):
+        for k2 in range(nkpts):
+            tril = raw[k1 * nkpts + k2]
+            if aosym == "s1" or k1 == k2:
+                if tril.shape[1] == nao * (nao + 1) // 2:
+                    V[k1, k2, :tril.shape[0]] = lib.unpack_tril(tril)
+                else:
+                    V[k1, k2, :tril.shape[0]] = tril.reshape(-1, nao, nao)
+            else:
+                tril = np.asarray(tril, dtype=np.complex128, order="C")
+                triu = np.asarray(raw[k2 * nkpts + k1], dtype=np.complex128, order="C")
+                assert triu.shape == tril.shape
+                libpbc.PBCunpack_tril_triu(V[k1, k2].ctypes.data_as(ctypes.c_void_p), tril.ctypes.data_as(ctypes.c_void_p),
+                                           triu.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(tril.shape[0]), ctypes.c_int(nao))
+    return V
+
+
+def make_fast_get_jk(mydf, V):
+    '''
+    Returns a drop-in replacement of mydf.get_jk (same signature) that keeps the whole GDF tensor in memory,
+    usage: mydf.get_jk = make_fast_get_jk(mydf, load_gdf_ao_k1k2(cderi, mydf.kpts, mydf.cell.nao_nr()))
+    V: AO GDF tensor V[k1, k2, L, p, q] in the k1k2 layout, k-points in the order of mydf.kpts;
+    it is reordered in place to V[k1, k2, r, L, q], so do not use V afterwards.
     Same formulas as pyscf.pbc.df.df_jk.get_j_kpts / get_k_kpts:
         rho[x, L] = 1/Nk sum_k sum_pq V[k, k, L, p, q] D[x, k, q, p],  J[x, k] = sum_L rho[x, L] V[k, k, L]
         K[x, k2, p, q] = 1/Nk sum_k1 sum_L sum_rs conj(V[k1, k2, L, s, p]) D[x, k1, s, r] V[k1, k2, L, r, q]
     K uses the SVD D = U S Vh truncated to its numerical rank (rank n_occ for HF and CIS).
-    The loaded tensor is reordered in place to V[k1, k2, r, L, q], so mydf keeps no other copy.
     Anything else (omega, kpts_band, other kpts) falls back to the original pyscf get_jk.
     '''
     from pyscf.pbc.df import df_jk
@@ -303,12 +351,7 @@ def make_fast_get_jk(mydf, kmesh, gdf_path=None):
     cell = mydf.cell
     kpts0 = np.asarray(mydf.kpts)
     nk = len(kpts0)
-    kpts_int = np.round(cell.get_scaled_kpts(kpts0) * kmesh).astype(int) % kmesh
-    cderi = mydf._cderi
-    if gdf_path is not None:
-        mydf._cderi = gdf_path
-    V = get_gdf_tensor_compact(mydf, kpts_int, kmesh, layout="k1k2")
-    mydf._cderi = cderi
+    assert V.shape[:2] == (nk, nk)
     Vkk = V[np.arange(nk), np.arange(nk)]
     nao = V.shape[-1]
     naux = V.shape[2]
