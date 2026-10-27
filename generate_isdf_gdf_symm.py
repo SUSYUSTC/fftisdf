@@ -40,6 +40,48 @@ def get_cholesky_mesh(mesh, max_size):
     return mesh1
 
 
+def get_slab_candidates_symm(cell, max_size, eps):
+    # 2D candidate points as in get_slab_candidates of generate_isdf_gdf.py (z truncated where the xy-averaged
+    # AO density n(z) < eps * max n), but taken as a subset of a periodic mesh (nx, ny, nz) so that every
+    # space-group operation permutes them: nx, ny even (fractional translations 1/2), nx = ny for equal
+    # in-plane lattice vectors, and the slab center on a z node (z mirror)
+    a = cell.lattice_vectors()
+    assert abs(a[0, 2]) < 1e-8 and abs(a[1, 2]) < 1e-8 and abs(a[2, 0]) < 1e-8 and abs(a[2, 1]) < 1e-8
+    Lz = a[2, 2]
+    z_atom = cell.atom_coords()[:, 2]
+    zc = 0.5 * (z_atom.min() + z_atom.max())
+
+    nxy = 12
+    f = (np.arange(nxy) + 0.5) / nxy
+    xy = np.stack(np.meshgrid(f, f, indexing="ij"), -1).reshape(-1, 2) @ a[:2, :2]
+    zf = np.linspace(0.0, Lz / 2, 1501)
+    n = np.empty(len(zf))
+    for i, z in enumerate(zf):
+        ao = cell.pbc_eval_gto("GTOval", np.hstack([xy, np.full((len(xy), 1), zc + z)]))
+        n[i] = (ao ** 2).sum(1).mean()
+    zcut = zf[np.where(n > eps * n.max())[0].max()]
+    square = abs(np.linalg.norm(a[0]) - np.linalg.norm(a[1])) < 1e-6
+
+    best = None
+    for h in np.linspace(0.05, 2.0, 3901) / 0.52917721092:
+        nx = 2 * int(np.ceil(np.linalg.norm(a[0]) / h / 2))
+        ny = 2 * int(np.ceil(np.linalg.norm(a[1]) / h / 2))
+        if square:
+            nx = ny = max(nx, ny)
+        nz = 2 * int(np.ceil(Lz / h / 2))
+        nz_half = int(np.floor(zcut / (Lz / nz)))
+        npts = nx * ny * (2 * nz_half + 1)
+        if npts <= max_size and (best is None or npts > best[0]):
+            best = (npts, nx, ny, nz, nz_half)
+    npts, nx, ny, nz, nz_half = best
+    iz0 = zc / Lz * nz
+    assert abs(iz0 - np.rint(iz0)) < 1e-6
+    iz = np.arange(-nz_half, nz_half + 1) + int(np.rint(iz0))
+    idx = np.stack(np.meshgrid(np.arange(nx), np.arange(ny), iz, indexing="ij"), -1).reshape(-1, 3)
+    coords = (idx / np.array([nx, ny, nz])) @ a
+    return coords, (nx, ny, nz), nz_half
+
+
 def screen_gdf_tensor(R, eps_inv_half, kmesh):
     nkpts = R.shape[0]
     negative = utils.negative_k(torch.arange(eps_inv_half.shape[0], device=R.device), kmesh)
@@ -49,7 +91,7 @@ def screen_gdf_tensor(R, eps_inv_half, kmesh):
     return R
 
 
-def save_isdf(chkfile, X, W, mesh=None, ix_sel=None, group_sel=None):
+def save_isdf(chkfile, X, W, mesh=None, ix_sel=None, group_sel=None, coords=None):
     with h5py.File(chkfile, "w") as f:
         f["inpv_kpt"] = X
         f["coul_kpt"] = W
@@ -59,6 +101,8 @@ def save_isdf(chkfile, X, W, mesh=None, ix_sel=None, group_sel=None):
             f["ix_sel"] = np.asarray(ix_sel, dtype=np.int64)
         if group_sel is not None:
             f["group_sel"] = np.asarray(group_sel, dtype=np.int64)
+        if coords is not None:
+            f["coords"] = np.asarray(coords)
 
 
 def k1k2_to_k1q(R, kpts_int, kmesh):
@@ -90,12 +134,10 @@ def compute_residual_diag(metx, ix_sel):
     return np.maximum(diag_res, 0.0)
 
 
-def select_interpolating_points_manual(isdf, cisdf=None, use_symmetry=False):
+def select_interpolating_points_manual(isdf, coord, mesh, cisdf=None, use_symmetry=False):
     cell = isdf.cell
     nao = cell.nao_nr()
     ov = isdf.ov
-    grids = isdf.grids
-    coord = grids.coords
     ngrid = coord.shape[0]
     kpts = isdf.kpts
 
@@ -108,7 +150,7 @@ def select_interpolating_points_manual(isdf, cisdf=None, use_symmetry=False):
         metx = fft.isdf.compute_metx_pair(occ_kpt, vir_kpt)
 
     if use_symmetry:
-        symm_info = libsymm.classify_grid_by_symmetry(cell, cell.mesh, coords=coord)
+        symm_info = libsymm.classify_grid_by_symmetry(cell, mesh, coords=coord)
         groups = symm_info["orbits"]
         orbit_id = symm_info["orbit_id"]
     else:
@@ -158,6 +200,7 @@ parser.add_argument("--screen", action="store_true")
 parser.add_argument("--ov", action="store_true")
 parser.add_argument("--nosymm", action="store_true")
 parser.add_argument("-cholesky_max", type=int, default=None)
+parser.add_argument("-grid_eps", type=float, default=1e-8)
 args = parser.parse_args()
 
 system = args.system
@@ -206,6 +249,9 @@ fft.isdf.CHOLESKY_MAX_SIZE = cholesky_max
 cholesky_mesh = get_cholesky_mesh(cell.mesh, cholesky_max)
 f4 = lambda n: (int(n) - 1) // 4 * 4 + 4
 cholesky_mesh = tuple([f4(m) for m in cholesky_mesh])  # make sure the mesh is a multiple of 4
+# 2D: candidate interpolation points on a z-truncated subset of a symmetric periodic mesh
+if cell.dimension == 2:
+    slab_coords, cholesky_mesh, nz_half = get_slab_candidates_symm(cell, cholesky_max, args.grid_eps)
 
 C = np.asarray(mf.mo_coeff)
 nkpts, nao, nmo = C.shape
@@ -218,6 +264,10 @@ print("cell.mesh      =", cell.mesh)
 print("cholesky mesh  =", cholesky_mesh)
 print("cholesky size  =", int(np.prod(cholesky_mesh)))
 print("cholesky max   =", cholesky_max)
+if cell.dimension == 2:
+    print("grid eps       =", args.grid_eps)
+    print("grid z nodes   =", 2 * nz_half + 1)
+    print("slab points    =", slab_coords.shape[0])
 print("kmesh          =", kmesh)
 print("basis          =", basis)
 print("dft pkl        =", dft_pkl)
@@ -246,8 +296,13 @@ else:
 isdf_new.verbose = 5
 
 t0 = time.time()
-coord_sel, ix_sel, group_sel = select_interpolating_points_manual(isdf_new, cisdf=c_isdf, use_symmetry=use_symm)
-coords = np.asarray(isdf_new.grids.coords)
+if cell.dimension == 2:
+    coords = slab_coords
+else:
+    coords = np.asarray(isdf_new.grids.coords)
+coord_sel, ix_sel, group_sel = select_interpolating_points_manual(
+    isdf_new, coords, cell_isdf.mesh, cisdf=c_isdf, use_symmetry=use_symm
+)
 X_ao = cell_isdf.pbc_eval_gto("GTOval", coord_sel, kpts=kpts)
 X_ao = np.asarray(X_ao, dtype=np.complex128)
 print("custom selection time =", time.time() - t0)
@@ -273,8 +328,10 @@ Xv = torch.from_numpy(X_ao @ Cvir).to(dtype=complex_dtype)
 
 print("")
 print("Loading GDF tensor in AO k1k2 layout ...", flush=True)
-R_ao = utils.get_gdf_tensor_compact(mf.with_df, kpts_int, kmesh, progressbar=True, layout="k1k2")
+# signed GDF: 2D truncated Coulomb gives a negative auxiliary channel at q = 0
+R_ao, S = utils.get_gdf_tensor_compact(mf.with_df, kpts_int, kmesh, progressbar=True, layout="k1k2", signed=True)
 R_ao = torch.from_numpy(R_ao).to(dtype=complex_dtype)
+S = torch.from_numpy(S)
 if use_ov:
     print("Transforming GDF tensor AO -> OV ...", flush=True)
     Cocc_t = torch.from_numpy(Cocc).to(dtype=complex_dtype)
@@ -295,6 +352,7 @@ print("Converting GDF tensor k1k2 -> k1q ...", flush=True)
 R = k1k2_to_k1q(R, kpts_int, kmesh)
 
 if screen:
+    assert (S >= 0).all()
     print("Applying screening ...", flush=True)
     eps = np.load(screening_path)[:, 1:, 1:].copy()
     eps_inv_half = utils.matrix_power(eps, 0.5)
@@ -339,13 +397,13 @@ def scan_reg(A, B, df_norm2):
 
 
 if use_ov:
-    df_norm2 = utils.df_inner_from_mo(R_t, kmesh).real
+    df_norm2 = utils.df_inner_from_mo(R_t, kmesh, S=S).real
     A = utils.thc_ovvo_build_Lbar(Xo, Xv, Xo, Xv, kmesh)
-    B = utils.thc_df_ov_rhs_from_mo(Xo, Xv, R_t, kmesh)
+    B = utils.thc_df_ov_rhs_from_mo(Xo, Xv, R_t, kmesh, S=S)
 else:
-    df_norm2 = utils.df_inner_from_mo(R_t, kmesh).real
+    df_norm2 = utils.df_inner_from_mo(R_t, kmesh, S=S).real
     A = utils.thc_build_Lbar(X, X, kmesh)
-    B = utils.thc_df_ov_rhs_from_mo(X, X, R_t, kmesh)
+    B = utils.thc_df_ov_rhs_from_mo(X, X, R_t, kmesh, S=S)
 
 reg, W, error2 = scan_reg(A, B, df_norm2.to(dtype=real_dtype))
 
@@ -362,7 +420,7 @@ else:
     W_symm_err = 0.0
     error2_sym = error2
     rel_error_sym = rel_error
-save_isdf(chkfile, X_ao, W.detach().cpu().numpy(), mesh=cell_isdf.mesh, ix_sel=ix_sel, group_sel=group_sel)
+save_isdf(chkfile, X_ao, W.detach().cpu().numpy(), mesh=cell_isdf.mesh, ix_sel=ix_sel, group_sel=group_sel, coords=coords)
 print("Saved ISDF-GDF chk =", chkfile)
 
 print("")
@@ -378,6 +436,8 @@ print("X norm    = %.16e" % np.linalg.svd(X_ao.reshape(nkpts * X_ao.shape[1], na
 print("W norm    = %.16e" % torch.abs(W).max().detach().cpu().numpy())
 
 if do_MP2:
+    # fft.ISDF builds its own (3D) Coulomb kernel
+    assert cell.dimension == 3
     mf_isdf = mf.copy()
     mf_isdf.with_df = fft.ISDF(cell, kpts)
     mf_isdf.with_df._isdf = chkfile

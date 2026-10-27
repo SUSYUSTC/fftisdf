@@ -60,10 +60,37 @@ def finite_grid_transform(cell, coords, op, mesh):
     return perm, L_frac, max(resid0, resid1)
 
 
+def symmetry_detection_cell(cell):
+    # PySCF drops z-flipping and nonsymmorphic operations for 2D cells, so
+    # detect the operations on a 3D copy. k maps and D matrices only depend on
+    # the rotations; the z translations are fixed by fix_2d_z_translations.
+    cell_sym = cell.copy()
+    if cell.dimension == 2:
+        cell_sym.dimension = 3
+    cell_sym.build(False, False)
+    return cell_sym
+
+
+def fix_2d_z_translations(cell, ops):
+    # A 2D cell has no lattice images along z, so a z-flipping operation must
+    # map the slab onto itself without a z lattice shift: z -> 2 z_c - z.
+    if cell.dimension != 2:
+        return
+    z = cell.get_scaled_atom_coords()[:, 2]
+    for op in ops:
+        assert np.all(op.rot[2, :2] == 0) and np.all(op.rot[:2, 2] == 0)
+        if op.rot[2, 2] == -1:
+            op.trans[2] += np.rint(z.min() + z.max() - op.trans[2])
+        else:
+            op.trans[2] -= np.rint(op.trans[2])
+        z1 = op.rot[2, 2] * z + op.trans[2]
+        assert np.max(np.abs(np.sort(z1) - np.sort(z))) < 1e-6
+
+
 def build_symmetry_kpts(cell, kmesh, time_reversal=False):
     # Build PySCF's full-BZ k-point object with space-group metadata. The
     # object contains both the symmetry operations and the map k -> gk.
-    cell_sym = cell.copy()
+    cell_sym = symmetry_detection_cell(cell)
     cell_sym.space_group_symmetry = True
     cell_sym.symmorphic = False
     cell_sym.build(False, False)
@@ -73,6 +100,7 @@ def build_symmetry_kpts(cell, kmesh, time_reversal=False):
         time_reversal_symmetry=time_reversal,
     )
     canonicalize_space_group_translations(kpts.ops)
+    fix_2d_z_translations(cell, kpts.ops)
     return cell_sym, kpts
 
 
@@ -343,12 +371,13 @@ def classify_grid_by_symmetry(cell, mesh, coords=None, tol=1e-6):
     coords = np.asarray(coords)
     frac0 = np.mod(coords @ np.linalg.inv(cell.lattice_vectors()), 1.0)
 
-    symm = Symmetry(cell).build(
+    symm = Symmetry(symmetry_detection_cell(cell)).build(
         space_group_symmetry=True,
         symmorphic=False,
         check_mesh_symmetry=False,
     )
     canonicalize_space_group_translations(symm.ops)
+    fix_2d_z_translations(cell, symm.ops)
 
     op_ids = []
     perms = []

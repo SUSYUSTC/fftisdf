@@ -253,12 +253,14 @@ with h5py.File(chkfile, "r") as f:
     mesh = np.asarray(f["mesh"], dtype=np.int64)
     ix_sel = np.asarray(f["ix_sel"], dtype=np.int64)
     group_sel = np.asarray(f["group_sel"], dtype=np.int64) if "group_sel" in f else None
+    coords = np.asarray(f["coords"]) if "coords" in f else None
 
 cell = mf.cell
 kpts = cell.make_kpts(kmesh)
 cell_isdf = cell.copy()
 cell_isdf.mesh = mesh
-coords = cell_isdf.gen_uniform_grids(cell_isdf.mesh)
+if coords is None:
+    coords = cell_isdf.gen_uniform_grids(cell_isdf.mesh)
 
 symm = libsymm.PBCSymmetry(cell_isdf, kmesh, kpts, dtype=torch.complex128)
 perm, phase = libsymm.build_isdf_grid_transform(symm, coords, ix_sel, mesh=cell_isdf.mesh)
