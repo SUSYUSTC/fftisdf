@@ -287,7 +287,7 @@ def get_gdf_tensor_compact(gdf, kpts_int, kmesh, C1=None, C2=None, *, layout, pr
     return R
 
 
-def load_gdf_k1k2(cderi, kpts, nao, C=None, label="j3c"):
+def load_gdf_k1k2(cderi, kpts, nao, C=None, label="j3c", diag_only=False):
     """
     GDF tensor in the k1k2 layout from a pyscf (>= 2.1) cderi file, rows [positive, negative, zero padding]
     with signs S[k1, k2, L] = +1, -1, 0: every contraction over L of two factors carries the weight S
@@ -298,8 +298,10 @@ def load_gdf_k1k2(cderi, kpts, nao, C=None, label="j3c"):
     Every dataset is read exactly once with low-level h5py calls; the aosym='s2' blocks (k1 != k2: lower triangle of
     (k1, k2) plus lower triangle of (k2, k1)) are read and unpacked pairwise with the pyscf C routine.
     kpts: k-points of the GDF object (checked against the file); V is indexed in this order.
+    diag_only (C=None only): returns only the q = 0 blocks V[k, L, p, q] = V[k, k, L, p, q] and S[k, L] (enough for J).
     """
     nkpts = len(kpts)
+    assert not (diag_only and C is not None)
     libpbc = lib.load_library("libpbc")
     with h5py.File(cderi, "r") as f:
         assert np.allclose(f["kpts"][()], kpts)
@@ -326,19 +328,31 @@ def load_gdf_k1k2(cderi, kpts, nao, C=None, label="j3c"):
             return np.vstack([read(f"{label}/{key}"), read(f"{label}-/{key}")])
 
         # row counts per block (the shapes only, no data)
+        if diag_only:
+            pairs = [(k, k) for k in range(nkpts)]
+        else:
+            pairs = [(k1, k2) for k1 in range(nkpts) for k2 in range(nkpts)]
         npos = np.zeros((nkpts, nkpts), dtype=int)
         nneg = np.zeros((nkpts, nkpts), dtype=int)
-        for k1 in range(nkpts):
-            for k2 in range(nkpts):
-                npos[k1, k2] = f[f"{label}/{k1 * nkpts + k2}/0"].shape[0]
-                if has_neg and f"{k1 * nkpts + k2}" in f[label + "-"]:
-                    nneg[k1, k2] = f[f"{label}-/{k1 * nkpts + k2}/0"].shape[0]
+        for k1, k2 in pairs:
+            npos[k1, k2] = f[f"{label}/{k1 * nkpts + k2}/0"].shape[0]
+            if has_neg and f"{k1 * nkpts + k2}" in f[label + "-"]:
+                nneg[k1, k2] = f[f"{label}-/{k1 * nkpts + k2}/0"].shape[0]
         naux = int((npos + nneg).max())
         S = np.zeros((nkpts, nkpts, naux))
-        for k1 in range(nkpts):
-            for k2 in range(nkpts):
-                S[k1, k2, :npos[k1, k2]] = 1.0
-                S[k1, k2, npos[k1, k2]:npos[k1, k2] + nneg[k1, k2]] = -1.0
+        for k1, k2 in pairs:
+            S[k1, k2, :npos[k1, k2]] = 1.0
+            S[k1, k2, npos[k1, k2]:npos[k1, k2] + nneg[k1, k2]] = -1.0
+
+        if diag_only:
+            V = np.zeros((nkpts, naux, nao, nao), dtype=np.complex128)
+            for k in range(nkpts):
+                tril = read_signed(k, k)
+                if tril.shape[1] == nao * (nao + 1) // 2:
+                    V[k, :tril.shape[0]] = lib.unpack_tril(tril)
+                else:
+                    V[k, :tril.shape[0]] = tril.reshape(-1, nao, nao)
+            return V, S[np.arange(nkpts), np.arange(nkpts)]
 
         if C is None:
             V = np.zeros((nkpts, nkpts, naux, nao, nao), dtype=np.complex128)
@@ -459,6 +473,31 @@ def make_fast_get_jk(mydf, V, S):
         return vj, vk
 
     return fast_get_jk
+
+
+def make_fast_get_j(mydf, Vkk, Skk):
+    '''
+    J-only version of make_fast_get_jk (pure DFT) from the q = 0 blocks only,
+    usage: mydf.get_jk = make_fast_get_j(mydf, *load_gdf_k1k2(cderi, mydf.kpts, mydf.cell.nao_nr(), diag_only=True))
+    with_k and anything else fall back to the original pyscf get_jk.
+    '''
+    from pyscf.pbc.df import df_jk
+
+    get_jk_orig = mydf.get_jk
+    kpts0 = np.asarray(mydf.kpts)
+    nk = len(kpts0)
+    assert Vkk.shape[0] == nk and np.allclose(Skk, Skk[0])
+
+    def fast_get_j(dm, hermi=1, kpts=None, kpts_band=None, with_j=True, with_k=True, omega=None, exxdiv=None):
+        if with_k or not with_j or (omega is not None and omega != 0) or kpts_band is not None or (kpts is not None and not np.allclose(kpts, kpts0)):
+            return get_jk_orig(dm, hermi, kpts, kpts_band, with_j, with_k, omega, exxdiv)
+        dm_kpts = lib.asarray(dm, order="C")
+        dms = df_jk._format_dms(dm_kpts, kpts0)
+        rho = np.einsum("kLpq,xkqp->xL", Vkk, dms) * Skk[0] / nk
+        vj = df_jk._format_jks(np.einsum("xL,kLpq->xkpq", rho, Vkk), dm_kpts, None, kpts0)
+        return vj, None
+
+    return fast_get_j
 
 
 def gdf_compact_to_full(tensor_in, kpts_int, kmesh, *, layout):

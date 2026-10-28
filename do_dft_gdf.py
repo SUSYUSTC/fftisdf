@@ -8,6 +8,7 @@ pyscf.scf.hf.remove_overlap_zero_eigenvalue = False
 from pyscf.pbc import scf, df
 import pyscf.pbc.df.rsdf_builder
 import system_common
+import utils
 
 
 parser = argparse.ArgumentParser()
@@ -75,11 +76,14 @@ print("conv_tol =", mf.conv_tol, flush=True)
 print("GDF chkfile =", gdf_chk, flush=True)
 print("j2c_eig_always =", j2c_eig_always, flush=True)
 print("linear_dep_threshold =", linear_dep_threshold, flush=True)
+# pyscf GDF get_j is very slow for many k-points (~15 min per Fock build at Nk = 343); J from the in-memory q = 0 blocks
+mf.with_df.get_jk = utils.make_fast_get_j(mf.with_df, *utils.load_gdf_k1k2(gdf_chk, mf.with_df.kpts, cell.nao_nr(), diag_only=True))
 print("Running SCF ...", flush=True)
 mf.kernel()
 print('min mo energy', np.asarray(mf.mo_energy).min())
 print('max mo energy', np.asarray(mf.mo_energy).max())
 
+del mf.with_df.get_jk
 with open(dft_pkl, "wb") as f:
     pickle.dump(mf, f)
 print("Saved DFT pickle =", dft_pkl, flush=True)

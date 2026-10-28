@@ -8,6 +8,7 @@ import torch
 from pyscf.pbc import df
 import libsymm
 import system_common
+import utils
 
 
 def get_symmetry_error(symm, A):
@@ -44,6 +45,8 @@ if getattr(mf, "with_df", None) is None:
     mf.with_df = df.GDF(cell, kpts)
 if getattr(mf.with_df, "_cderi", None) is None:
     mf.with_df._cderi = gdf_chk
+# pyscf GDF get_j is very slow for many k-points (~15 min per Fock build at Nk = 343); J from the in-memory q = 0 blocks
+mf.with_df.get_jk = utils.make_fast_get_j(mf.with_df, *utils.load_gdf_k1k2(mf.with_df._cderi, mf.with_df.kpts, cell.nao_nr(), diag_only=True))
 
 dm0 = np.asarray(mf.make_rdm1())
 fock0 = np.asarray(mf.get_fock(dm=dm0))
@@ -77,6 +80,7 @@ mf.mo_energy = mo_energy_sym
 mf.mo_coeff = mo_coeff_sym
 mf.mo_occ = mo_occ_sym
 
+del mf.with_df.get_jk
 with open(out_pkl, "wb") as f:
     pickle.dump(mf, f)
 
