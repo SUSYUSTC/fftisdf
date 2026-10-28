@@ -149,6 +149,8 @@ args = parser.parse_args()
 
 if args.device is None:
     device, gpu_reserve_tensor = optimize_X_common.get_device()
+elif args.device < 0:
+    device = torch.device("cpu")
 else:
     device = torch.device(f"cuda:{args.device}")
 
